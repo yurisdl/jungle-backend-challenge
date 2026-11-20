@@ -1,3 +1,5 @@
+import { hostname } from 'node:os';
+
 export type AppRole = 'api' | 'consumer' | 'outbox' | 'pending-reference';
 
 export interface AppConfig {
@@ -57,7 +59,7 @@ const list = (value: string | undefined, fallback: string[]) =>
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): AppConfig {
   return {
-    instanceId: env.INSTANCE_ID ?? `instance-${process.pid}`,
+    instanceId: env.INSTANCE_ID ?? `${hostname()}-${process.pid}`,
     port: int(env.PORT, 3000),
     roles: list(env.APP_ROLES, ['api', 'consumer', 'outbox', 'pending-reference']) as AppRole[],
     logLevel: env.LOG_LEVEL ?? 'info',
