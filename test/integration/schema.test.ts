@@ -213,12 +213,15 @@ describe('schema constraints', () => {
 
   test('idempotency key and (provider, external id) are unique', async () => {
     const { walletId, playerId } = await seedWallet();
-    await inTx([insertTx(walletId, playerId, { idempotency_key: 'dup-key-1', external_transaction_id: 'x1' })]);
+    const k1 = `dup-key-1-${walletId}`;
+    const k2 = `dup-key-2-${walletId}`;
+    const x1 = `x1-${walletId}`;
+    await inTx([insertTx(walletId, playerId, { idempotency_key: k1, external_transaction_id: x1 })]);
     await expect(
-      inTx([insertTx(walletId, playerId, { idempotency_key: 'dup-key-1', external_transaction_id: 'x2' })]),
+      inTx([insertTx(walletId, playerId, { idempotency_key: k1, external_transaction_id: `x2-${walletId}` })]),
     ).rejects.toThrow(/wager_tx_idempotency_key_uq/);
     await expect(
-      inTx([insertTx(walletId, playerId, { idempotency_key: 'dup-key-2', external_transaction_id: 'x1' })]),
+      inTx([insertTx(walletId, playerId, { idempotency_key: k2, external_transaction_id: x1 })]),
     ).rejects.toThrow(/wager_tx_provider_external_uq/);
   });
 
