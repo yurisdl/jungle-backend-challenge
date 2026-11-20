@@ -1,0 +1,178 @@
+/**
+ * Load test — `bun run test:load`.
+ *
+ * Spawns N real instances (default 3), creates W wallets and fires R wager
+ * requests over HTTP with C concurrent clients, round-robin across the
+ * instances. A share of the requests targets a single "hot" wallet and a
+ * share are deliberate duplicates (same Idempotency-Key). At the end it
+ * checks the invariants (balance == ledger for every wallet), reads the
+ * instances' Prometheus metrics and prints a Markdown report.
+ *
+ * Env: LOAD_INSTANCES, LOAD_WALLETS, LOAD_REQUESTS, LOAD_CONCURRENCY, LOAD_HOT_SHARE, LOAD_DUPLICATE_SHARE
+ */
+import { randomUUID } from 'node:crypto';
+import { cpus, totalmem } from 'node:os';
+import {
+  assertGlobalConsistency,
+  createWallet,
+  type Instance,
+  queueEnv,
+  spawnInstance,
+  sql,
+  submit,
+  type WagerInput,
+  type WalletInfo,
+} from '../test/support/harness';
+
+const N = Number(process.env.LOAD_INSTANCES ?? 3);
+const WALLETS = Number(process.env.LOAD_WALLETS ?? 200);
+const REQUESTS = Number(process.env.LOAD_REQUESTS ?? 10_000);
+const CONCURRENCY = Number(process.env.LOAD_CONCURRENCY ?? 64);
+const HOT_SHARE = Number(process.env.LOAD_HOT_SHARE ?? 0.2);
+const DUP_SHARE = Number(process.env.LOAD_DUPLICATE_SHARE ?? 0.1);
+
+const percentile = (sorted: number[], p: number) => sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))]!;
+
+async function scrape(instances: Instance[], prefix: string): Promise<number> {
+  let total = 0;
+  for (const i of instances) {
+    const text = await (await fetch(`${i.baseUrl}/metrics`)).text();
+    for (const line of text.split('\n')) if (line.startsWith(prefix)) total += Number(line.split(' ').pop());
+  }
+  return total;
+}
+
+async function main() {
+  const env = { ...queueEnv('load'), DB_POOL_MAX: '25', LOG_LEVEL: 'warn' };
+  const instances: Instance[] = [];
+  for (let i = 0; i < N; i++) instances.push(await spawnInstance(`load-${i}`, { ...env, LOG_LEVEL: 'warn' }).catch(async () => {
+    // spawnInstance waits on readiness; LOG_LEVEL=warn hides the startup line for worker-only roles only
+    throw new Error('instance failed to start');
+  }));
+  try {
+    const wallets: WalletInfo[] = [];
+    for (let i = 0; i < WALLETS; i++) wallets.push(await createWallet(instances[i % N]!.baseUrl, '1000.00'));
+    const hot = await createWallet(instances[0]!.baseUrl, '1000.00');
+
+    const sent: WagerInput[] = [];
+    const latencies: number[] = [];
+    const hotLatencies: number[] = [];
+    const coldLatencies: number[] = [];
+    const statuses = new Map<number, number>();
+    let errors = 0;
+    let cursor = 0;
+
+    const next = (): WagerInput => {
+      if (sent.length > 0 && Math.random() < DUP_SHARE) return sent[Math.floor(Math.random() * sent.length)]!;
+      const wallet = Math.random() < HOT_SHARE ? hot : wallets[Math.floor(Math.random() * wallets.length)]!;
+      const win = Math.random() < 0.3;
+      const op: WagerInput = {
+        wallet,
+        kind: win ? 'WIN' : 'BET',
+        amount: win ? '2.00' : '1.00',
+        externalTransactionId: `load-${randomUUID()}`,
+      };
+      sent.push(op);
+      return op;
+    };
+
+    const started = performance.now();
+    await Promise.all(
+      Array.from({ length: CONCURRENCY }, async () => {
+        while (cursor < REQUESTS) {
+          const n = cursor++;
+          const t0 = performance.now();
+          const op = next();
+          try {
+            const res = await submit(instances[n % N]!.baseUrl, op);
+            statuses.set(res.status, (statuses.get(res.status) ?? 0) + 1);
+            if (res.status >= 500) errors++;
+          } catch {
+            errors++;
+          }
+          const ms = performance.now() - t0;
+          latencies.push(ms);
+          (op.wallet.id === hot.id ? hotLatencies : coldLatencies).push(ms);
+        }
+      }),
+    );
+    const elapsedS = (performance.now() - started) / 1000;
+
+    // wait for the outbox to drain and measure how long it takes
+    const drainStart = performance.now();
+    for (;;) {
+      const [row] = await sql<{ pending: number }>(`select count(*)::int as pending from outbox_messages where published_at is null`);
+      if (row!.pending === 0) break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    const drainS = (performance.now() - drainStart) / 1000;
+    await assertGlobalConsistency();
+
+    latencies.sort((a, b) => a - b);
+    hotLatencies.sort((a, b) => a - b);
+    coldLatencies.sort((a, b) => a - b);
+    const p = (xs: number[]) => `${percentile(xs, 50).toFixed(1)} / ${percentile(xs, 95).toFixed(1)} / ${percentile(xs, 99).toFixed(1)} ms`;
+    const lockConflicts = await scrape(instances, 'wallet_lock_conflicts_total');
+    const retries = await scrape(instances, 'wager_retries_total');
+    const replays = await scrape(instances, 'wager_duplicates_total');
+    const lag = await scrape(instances, 'outbox_lag_seconds');
+
+    const report = `# Load test results
+
+_Generated by \`bun run test:load\` on ${new Date().toISOString()}._
+
+## Environment
+
+- ${N} application instances (separate Bun processes, all roles), PostgreSQL 16 and LocalStack in Docker on the same host
+- Host: ${cpus().length} vCPU, ${(totalmem() / 2 ** 30).toFixed(1)} GiB RAM — load generator on the same machine
+- Pool: 25 connections per instance; lock_timeout 2 s
+
+## Methodology
+
+- ${WALLETS} wallets + 1 hot wallet, all opened with 1000.00 BRL
+- ${REQUESTS} HTTP requests from ${CONCURRENCY} concurrent clients, round-robin across instances
+- Mix: 70% BET 1.00 / 30% WIN 2.00; ${Math.round(HOT_SHARE * 100)}% of new operations target the hot wallet; ${Math.round(DUP_SHARE * 100)}% of requests replay an earlier one (same Idempotency-Key)
+- After the run: wait for the outbox to drain, then check \`balance == Σ ledger\` for every wallet in the database
+
+## Results
+
+| metric | value |
+|---|---|
+| duration | ${elapsedS.toFixed(1)} s |
+| throughput | ${(REQUESTS / elapsedS).toFixed(0)} req/s |
+| latency p50 / p95 / p99 (all) | ${p(latencies)} |
+| latency p50 / p95 / p99 (regular wallets, ${coldLatencies.length} req) | ${p(coldLatencies)} |
+| latency p50 / p95 / p99 (hot wallet, ${hotLatencies.length} req) | ${p(hotLatencies)} |
+| max latency | ${latencies[latencies.length - 1]!.toFixed(1)} ms |
+| error rate (5xx / network) | ${((errors / REQUESTS) * 100).toFixed(2)}% (${errors}) |
+| status codes | ${[...statuses.entries()].sort().map(([s, c]) => `${s}: ${c}`).join(', ')} |
+| duplicates detected (replays) | ${replays} |
+| lock conflicts (timeouts, races, deadlocks) | ${lockConflicts} |
+| transaction retries | ${retries} |
+| outbox drain after load | ${drainS.toFixed(1)} s (lag gauge at end: ${lag.toFixed(1)} s) |
+| invariant balance == ledger | ✅ all wallets |
+
+## Reading the numbers
+
+- 201 = processed, 200 = idempotent replay, 422 = business rejection (insufficient funds on the hot wallet).
+- The hot wallet is the bottleneck by design: every operation on it holds the same row lock, so its
+  throughput is bounded by one transaction at a time (≈ 1 / lock-hold time). Its requests queue (first in
+  the per-instance bulkhead, then on the row lock), which is what drives the global p95/p99. Regular wallets
+  are not slowed down by it because the bulkhead keeps the hot wallet from monopolising the connection pool.
+- The generator is closed-loop: clients stuck on hot-wallet requests are not issuing other requests, so the
+  global req/s is bounded by the hot share as well. An open-loop test would show the regular-wallet capacity.
+- Numbers come from a single shared host (generator, 3 instances, PostgreSQL and LocalStack competing for
+  the same CPUs); they are a lower bound, not a capacity statement.
+`;
+    console.log(report);
+    await Bun.write('docs/load-test-results.md', report);
+  } finally {
+    await Promise.all(instances.map((i) => i.kill('SIGTERM')));
+    process.exit(0);
+  }
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

@@ -1,6 +1,7 @@
 import type { SQSClient } from '@aws-sdk/client-sqs';
 import type { MikroORM } from '@mikro-orm/postgresql';
 import type { UnitOfWork } from './application/ports';
+import { KeyedSerializer } from './application/services/keyed-serializer';
 import { RecordFailedTransaction } from './application/use-cases/record-failed-transaction.use-case';
 import { RetryPendingReference } from './application/use-cases/retry-pending-reference.use-case';
 import { SubmitWagerTransaction } from './application/use-cases/submit-wager-transaction.use-case';
@@ -26,6 +27,7 @@ export class AppContainer {
   readonly metrics = new PrometheusMetrics();
   readonly clock = new SystemClock();
   readonly ids = new UuidV7Generator();
+  readonly walletGate = new KeyedSerializer();
   readonly faults: FaultInjector;
   readonly sqs: SQSClient;
   readonly queues: QueueRegistry;
@@ -50,10 +52,18 @@ export class AppContainer {
     this.faults = new FaultInjector(config.faults);
     this.sqs = createSqsClient(config);
     this.queues = new QueueRegistry(this.sqs, config);
-    this.uow = new MikroOrmUnitOfWork(orm, config.database);
+    this.uow = new MikroOrmUnitOfWork(orm);
 
     const referencePolicy = config.pendingReference;
-    this.submitWager = new SubmitWagerTransaction(this.uow, this.clock, this.ids, this.metrics, this.logger, referencePolicy);
+    this.submitWager = new SubmitWagerTransaction(
+      this.uow,
+      this.clock,
+      this.ids,
+      this.metrics,
+      this.logger,
+      referencePolicy,
+      this.walletGate,
+    );
     this.retryPendingReference = new RetryPendingReference(
       this.uow,
       this.clock,

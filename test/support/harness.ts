@@ -9,12 +9,13 @@ import {
 import { MikroORM } from '@mikro-orm/postgresql';
 import { expect } from 'bun:test';
 import { randomUUID } from 'node:crypto';
+import { resolve } from 'node:path';
 import { startApplication, type RunningApp } from '../../src/app';
 import { type AppConfig, loadConfig } from '../../src/infrastructure/config/app-config';
 import { ormOptions } from '../../src/infrastructure/persistence/orm';
 import { createSqsClient, QueueRegistry, type QueueUrls } from '../../src/infrastructure/sqs/sqs';
 
-export const ROOT = new URL('../..', import.meta.url).pathname;
+export const ROOT = resolve(__dirname, '../..');
 
 /** Infrastructure comes from docker compose (`bun run infra:up`). */
 export const BASE_ENV: Record<string, string> = {

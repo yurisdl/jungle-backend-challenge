@@ -7,6 +7,7 @@ import {
 } from '../errors';
 import type { AppLogger, Clock, IdGenerator, MessageSource, Metrics, TransactionalStore, UnitOfWork } from '../ports';
 import { withConflictRetry } from '../services/conflict-retry';
+import { KeyedSerializer } from '../services/keyed-serializer';
 import { hashOf, type WagerCommand } from '../services/wager-command';
 import {
   nextReferenceAttempt,
@@ -48,6 +49,7 @@ export class SubmitWagerTransaction {
     private readonly metrics: Metrics,
     private readonly logger: AppLogger,
     private readonly referencePolicy: ReferenceRetryPolicy,
+    private readonly walletGate: KeyedSerializer = new KeyedSerializer(),
   ) {
     this.writer = new WagerSettlementWriter(ids);
   }
@@ -57,8 +59,10 @@ export class SubmitWagerTransaction {
     const payloadHash = hashOf(command);
     let result: SubmitResult;
     try {
-      result = await withConflictRetry(this.metrics, { operation: 'submit-wager' }, () =>
-        this.uow.transaction((store) => this.attempt(store, command, payloadHash, ctx)),
+      result = await this.walletGate.run(command.walletId, () =>
+        withConflictRetry(this.metrics, { operation: 'submit-wager' }, () =>
+          this.uow.transaction((store) => this.attempt(store, command, payloadHash, ctx)),
+        ),
       );
     } catch (error) {
       if (error instanceof TransientInfrastructureError && error.reason === 'LOCK_TIMEOUT') {
@@ -125,10 +129,15 @@ export class SubmitWagerTransaction {
     if (!wallet) {
       throw new UnknownWalletError(`wallet ${command.walletId} does not exist`);
     }
-    const late = await this.replay(store, command, payloadHash, ctx);
-    if (late) return finish(late);
-
-    const sameExternal = await store.transactions.findByExternalId(command.providerId, command.externalTransactionId);
+    // one round trip under the lock: same key (replay/conflict) or same external id (conflict)
+    const clashes = await store.transactions.findByKeyOrExternalId(
+      command.idempotencyKey,
+      command.providerId,
+      command.externalTransactionId,
+    );
+    const sameKey = clashes.find((t) => t.idempotencyKey === command.idempotencyKey);
+    if (sameKey) return finish(this.replayOf(sameKey, command, payloadHash, ctx));
+    const sameExternal = clashes[0];
     if (sameExternal) {
       this.metrics.duplicateDetected(ctx.source, 'external-id');
       throw new ExternalTransactionConflictError(
@@ -182,6 +191,15 @@ export class SubmitWagerTransaction {
   ): Promise<SubmitResult | undefined> {
     const existing = await store.transactions.findByIdempotencyKey(command.idempotencyKey);
     if (!existing) return undefined;
+    return this.replayOf(existing, command, payloadHash, ctx);
+  }
+
+  private replayOf(
+    existing: WagerTransaction,
+    command: WagerCommand,
+    payloadHash: string,
+    ctx: SubmitContext,
+  ): SubmitResult {
     if (!existing.matchesPayload(payloadHash)) {
       this.metrics.idempotencyConflict(ctx.source);
       throw new IdempotencyConflictError(

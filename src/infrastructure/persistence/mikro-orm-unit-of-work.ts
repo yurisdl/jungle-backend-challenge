@@ -92,6 +92,19 @@ class MikroOrmWagerTransactionRepository implements WagerTransactionRepository {
     return r ? WagerTransactionMapper.toDomain(r) : undefined;
   }
 
+  async findByKeyOrExternalId(
+    idempotencyKey: string,
+    providerId: string,
+    externalTransactionId: string,
+  ): Promise<WagerTransaction[]> {
+    const rows = await this.em.find(
+      WagerTransactionRecord,
+      { $or: [{ idempotencyKey }, { providerId, externalTransactionId }] },
+      { ...FRESH, limit: 2 },
+    );
+    return rows.map(WagerTransactionMapper.toDomain);
+  }
+
   async hasProcessedReversal(referenceTransactionId: string): Promise<boolean> {
     const count = await this.em.count(WagerTransactionRecord, {
       referenceTransactionId,
@@ -223,20 +236,14 @@ class MikroOrmOutboxRepository implements OutboxRepository {
 }
 
 export class MikroOrmUnitOfWork implements UnitOfWork {
-  constructor(
-    private readonly orm: MikroORM,
-    private readonly timeouts: { lockTimeoutMs: number; statementTimeoutMs: number },
-  ) {}
+  constructor(private readonly orm: MikroORM) {}
 
   async transaction<T>(work: (store: TransactionalStore) => Promise<T>, options: TransactionOptions = {}): Promise<T> {
     const em = this.orm.em.fork({ clear: true, useContext: false });
     try {
       return await em.transactional(
         async (tem) => {
-          await tem.execute(
-            `select set_config('lock_timeout', ?, true), set_config('statement_timeout', ?, true)`,
-            [`${this.timeouts.lockTimeoutMs}ms`, `${this.timeouts.statementTimeoutMs}ms`],
-          );
+          // lock_timeout / statement_timeout are set once per pooled connection (see orm.ts)
           return work({
             wallets: new MikroOrmWalletRepository(tem),
             transactions: new MikroOrmWagerTransactionRepository(tem),

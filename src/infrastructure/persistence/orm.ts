@@ -22,7 +22,18 @@ export function ormOptions(config: AppConfig): Options {
       allOrNothing: true,
       snapshot: false,
     },
-    pool: { min: config.database.poolMin, max: config.database.poolMax },
+    pool: {
+      min: config.database.poolMin,
+      max: config.database.poolMax,
+      // Applied once per physical connection: a transaction never waits for a
+      // row lock longer than lock_timeout (→ transient error, retried later).
+      afterCreate: (conn: { query: (sql: string, cb: (err?: Error) => void) => void }, done: (err: Error | undefined, conn: unknown) => void) => {
+        conn.query(
+          `SET lock_timeout = ${Number(config.database.lockTimeoutMs)}; SET statement_timeout = ${Number(config.database.statementTimeoutMs)}; SET idle_in_transaction_session_timeout = 60000`,
+          (err) => done(err, conn),
+        );
+      },
+    },
     // Decimal columns stay strings; timestamps come back as Date.
     forceUtcTimezone: true,
     // Identity map is never relied upon: each use case runs in its own fork.
