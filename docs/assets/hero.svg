@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 460" width="1200" height="460" role="img" aria-labelledby="t d">
+  <title id="t">Distributed Wagering Processor</title>
+  <desc id="d">Um bilhete de aposta sendo impresso: saldo 100.00, duas apostas de 80.00 em paralelo, uma aceita e outra recusada por saldo insuficiente, 49 reenvios devolvidos como replay, saldo final 20.00 igual à soma do ledger.</desc>
+  <style>
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .title { font-size: 52px; font-weight: 700; fill: #EDEFE6; letter-spacing: -1px; }
+    .lead { font-size: 17px; fill: #B9C8BF; }
+    .ink { fill: #1E2622; }
+    .muted { fill: #66736C; }
+    .debit { fill: #B8382E; }
+    .rule { stroke: #1E2622; stroke-width: 1.2; stroke-dasharray: 3 4; opacity: .55; }
+    .line { animation: print 12s steps(1, end) infinite both; }
+    .stamp { transform-box: fill-box; transform-origin: center; animation: stamp 12s ease-out infinite both; animation-delay: 4.6s; }
+    @keyframes print { 0% { opacity: 0 } 3% { opacity: 1 } 88% { opacity: 1 } 96% { opacity: 0 } 100% { opacity: 0 } }
+    @keyframes stamp {
+      0% { opacity: 0; transform: rotate(-9deg) scale(1.6) }
+      3% { opacity: .95; transform: rotate(-9deg) scale(1) }
+      50% { opacity: .95; transform: rotate(-9deg) scale(1) }
+      58% { opacity: 0; transform: rotate(-9deg) scale(1) }
+      100% { opacity: 0; transform: rotate(-9deg) scale(1) }
+    }
+    @media (prefers-reduced-motion: reduce) { .line, .stamp { animation: none; } }
+  </style>
+  <defs>
+    <pattern id="felt" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(35)">
+      <line x1="0" y1="0" x2="0" y2="6" stroke="#FFFFFF" stroke-opacity=".035" stroke-width="2"/>
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="460" rx="18" fill="#0E3B2E"/>
+  <rect width="1200" height="460" rx="18" fill="url(#felt)"/>
+  <rect x="12" y="12" width="1176" height="436" rx="12" fill="none" stroke="#C79A3A" stroke-opacity=".35"/>
+
+  <!-- chip -->
+  <g transform="translate(94 96)">
+    <circle r="28" fill="#B8382E"/>
+    <circle r="23" fill="none" stroke="#EDEFE6" stroke-width="6" stroke-dasharray="9 9"/>
+    <circle r="14" fill="none" stroke="#EDEFE6" stroke-opacity=".8" stroke-width="1.5"/>
+  </g>
+
+  <g class="mono">
+    <text class="title" x="64" y="192">Distributed</text>
+    <text class="title" x="64" y="248">Wagering</text>
+    <text class="title" x="64" y="304">Processor</text>
+    <text class="lead" x="66" y="352">Saldo exato com apostas duplicadas,</text>
+    <text class="lead" x="66" y="378">fora de ordem e concorrentes, em várias</text>
+    <text class="lead" x="66" y="404">instâncias ao mesmo tempo.</text>
+  </g>
+
+  <!-- receipt -->
+  <path d="M732 46 H1128 V402 l-11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 Z" fill="#000000" fill-opacity=".28" transform="translate(7 8)"/>
+  <path d="M732 46 H1128 V402 l-11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 -11 10 -11 -10 Z" fill="#EDEFE6"/>
+  <rect x="712" y="34" width="436" height="16" rx="8" fill="#072019"/>
+
+  <g class="mono" font-size="15">
+    <g class="line" style="animation-delay:.2s">
+      <text class="ink" x="756" y="88" font-size="17" font-weight="700">WAGER SLIP</text>
+      <text class="muted" x="1104" y="88" text-anchor="end">#0001</text>
+      <text class="muted" x="756" y="112" font-size="13">wallet 01a1fa8c, BRL, provider-a</text>
+      <line class="rule" x1="756" y1="128" x2="1104" y2="128"/>
+    </g>
+    <g class="line" style="animation-delay:.8s">
+      <text class="ink" x="756" y="156">OPENING</text>
+      <text class="ink" x="1104" y="156" text-anchor="end">+100.00</text>
+    </g>
+    <g class="line" style="animation-delay:1.6s">
+      <text class="ink" x="756" y="186">BET 80.00  instance-a</text>
+      <text class="ink" x="1020" y="186" text-anchor="end">201</text>
+      <text class="ink" x="1104" y="186" text-anchor="end">-80.00</text>
+    </g>
+    <g class="line" style="animation-delay:1.9s">
+      <text class="ink" x="756" y="216">BET 80.00  instance-b</text>
+      <text class="debit" x="1020" y="216" text-anchor="end">422</text>
+      <text class="debit" x="1104" y="216" text-anchor="end">0.00</text>
+      <text class="debit" x="772" y="236" font-size="13">INSUFFICIENT_FUNDS</text>
+    </g>
+    <g class="line" style="animation-delay:2.8s">
+      <text class="ink" x="756" y="266">BET 80.00  mesma key x49</text>
+      <text class="ink" x="1020" y="266" text-anchor="end">200</text>
+      <text class="ink" x="1104" y="266" text-anchor="end">0.00</text>
+    </g>
+    <g class="line" style="animation-delay:3.6s">
+      <line class="rule" x1="756" y1="290" x2="1104" y2="290"/>
+      <text class="ink" x="756" y="320" font-weight="700" font-size="17">SALDO</text>
+      <text class="ink" x="1104" y="320" font-weight="700" font-size="17" text-anchor="end">20.00</text>
+      <text class="muted" x="756" y="346">Σ ledger</text>
+      <text class="muted" x="1104" y="346" text-anchor="end">20.00</text>
+    </g>
+  </g>
+
+  <g class="stamp">
+    <rect x="752" y="356" width="168" height="38" rx="5" fill="none" stroke="#17664A" stroke-width="3"/>
+    <text x="836" y="382" text-anchor="middle" class="mono" font-size="17" font-weight="700" fill="#17664A" letter-spacing="2">CONSISTENTE</text>
+  </g>
+</svg>

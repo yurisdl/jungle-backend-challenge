@@ -1,32 +1,159 @@
-# Distributed Wagering Processor
+<p align="center">
+  <img src="docs/assets/hero.svg" width="100%" alt="Bilhete de aposta sendo impresso: saldo 100.00, duas apostas de 80.00 em paralelo em instâncias diferentes, uma aceita e outra recusada por saldo insuficiente, 49 reenvios devolvidos como replay, saldo final 20.00 igual à soma do ledger.">
+</p>
 
-[![CI](https://github.com/yurisdl/jungle-backend-challenge/actions/workflows/ci.yml/badge.svg)](https://github.com/yurisdl/jungle-backend-challenge/actions/workflows/ci.yml)
+<p align="center">
+  <a href="https://github.com/yurisdl/jungle-backend-challenge/actions/workflows/ci.yml"><img src="https://github.com/yurisdl/jungle-backend-challenge/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/Bun-1.4-0E3B2E?style=flat-square&labelColor=1E2622" alt="Bun 1.4">
+  <img src="https://img.shields.io/badge/TypeScript-strict-0E3B2E?style=flat-square&labelColor=1E2622" alt="TypeScript strict">
+  <img src="https://img.shields.io/badge/NestJS-10-0E3B2E?style=flat-square&labelColor=1E2622" alt="NestJS 10">
+  <img src="https://img.shields.io/badge/PostgreSQL-16-0E3B2E?style=flat-square&labelColor=1E2622" alt="PostgreSQL 16">
+  <img src="https://img.shields.io/badge/MikroORM-6-0E3B2E?style=flat-square&labelColor=1E2622" alt="MikroORM 6">
+  <img src="https://img.shields.io/badge/SQS-LocalStack-0E3B2E?style=flat-square&labelColor=1E2622" alt="SQS via LocalStack">
+  <img src="https://img.shields.io/badge/testes-121-C79A3A?style=flat-square&labelColor=1E2622" alt="121 testes">
+</p>
 
-Serviço financeiro distribuído que processa transações de apostas (`BET`, `WIN`, `LOSS`, `REFUND`, `ROLLBACK`) vindas de múltiplos provedores, por HTTP e por SQS, mantendo-se correto com mensagens duplicadas, fora de ordem, concorrentes e com várias instâncias rodando ao mesmo tempo.
+Serviço que recebe transações de apostas (`BET`, `WIN`, `LOSS`, `REFUND`, `ROLLBACK`) de vários provedores, por HTTP e por SQS, e mantém o saldo de cada jogador exato quando as mensagens chegam duplicadas, fora de ordem, ao mesmo tempo e em várias instâncias.
 
-- **Stack:** Bun 1.x · TypeScript estrito · NestJS (só a camada HTTP) · PostgreSQL 16 · MikroORM 6 · AWS SQS via LocalStack · Docker Compose
-- **Decisões, trade-offs e limitações:** [`ARCHITECTURE.md`](./ARCHITECTURE.md)
-- **Teste de carga:** [`docs/load-test-results.md`](./docs/load-test-results.md)
+O bilhete acima é o cenário obrigatório do desafio: saldo de 100.00 e duas apostas de 80.00 chegando juntas em instâncias diferentes. Uma passa, a outra é recusada, e os 49 reenvios da primeira devolvem a mesma resposta sem tocar no saldo. É o que `bun run demo` imprime no seu terminal.
 
-## Requisitos
+<table>
+  <tr>
+    <td><a href="./ARCHITECTURE.md"><b>Arquitetura e decisões</b></a><br><sub>como cada garantia é obtida, trade-offs e limitações</sub></td>
+    <td><a href="./docs/load-test-results.md"><b>Teste de carga</b></a><br><sub>10 000 requisições em 3 instâncias, 0 erros</sub></td>
+    <td><a href="./.github/workflows/ci.yml"><b>CI</b></a><br><sub>todas as suítes contra PostgreSQL e LocalStack reais</sub></td>
+  </tr>
+</table>
 
-- Docker com Docker Compose v2
-- Bun ≥ 1.3 (só para rodar fora de container e para os testes)
+## O que nunca acontece
 
-## Subir tudo com Docker Compose
+| Nunca | Por quê | Onde está provado |
+|---|---|---|
+| saldo negativo | `SELECT … FOR UPDATE` na wallet e `CHECK (balance_amount >= 0)` no banco | `test/concurrency/hot-wallet.test.ts` |
+| a mesma aposta debitada duas vezes | `Idempotency-Key` com hash do payload, inbox por mensagem e `UNIQUE` no banco | `hot-wallet.test.ts`, `sqs-consumer.test.ts` |
+| saldo que o ledger não explica | *constraint trigger* adiada para o commit compara a wallet com o último lançamento | `test/integration/schema.test.ts` |
+| reversão aplicada duas vezes | índice único parcial por referência | `schema.test.ts`, `wager-properties.test.ts` |
+| evento perdido ou publicado sem commit | outbox na mesma transação, publicada com `FOR UPDATE SKIP LOCKED` | `test/integration/outbox.test.ts` |
+| débito repetido quando a instância morre antes do ack | inbox gravada junto com o débito; a reentrega só é confirmada | `test/concurrency/multi-instance.test.ts` |
+| `500` quando o PostgreSQL cai | timeouts no cliente; conexão perdida vira `503` com `Retry-After` | `test/resilience/infra-outage.test.ts` |
+
+## Em um minuto
+
+```bash
+bun install && bun run infra:up && bun run migrate
+bun run demo
+```
+
+A demonstração sobe três instâncias reais (processos separados, mesmo PostgreSQL e SQS) e verifica cada passo:
+
+1. saldo 100.00 e duas apostas de 80.00 em paralelo em instâncias diferentes: uma `201`, outra `422 INSUFFICIENT_FUNDS`, saldo 20.00;
+2. 50 requisições idênticas nas três instâncias: uma `201`, 49 replays `200`, um único débito;
+3. um `ROLLBACK` que chega antes da aposta: `202 PENDING_REFERENCE`, processado quando a aposta aparece;
+4. um consumidor morto com `SIGKILL` depois do commit e antes do ack no SQS: a reentrega é absorvida pelo inbox;
+5. reconciliação de todas as wallets e um resumo das métricas Prometheus.
+
+<details>
+<summary>Saída da demonstração</summary>
+
+```text
+━━ 1. Cenário obrigatório: saldo 100, duas apostas de 80 em paralelo
+   aposta 1 → instance-a: HTTP 201 PROCESSED
+   aposta 2 → instance-b: HTTP 422 REJECTED (INSUFFICIENT_FUNDS)
+  ✔ exatamente uma aposta aprovada e a outra recusada por saldo insuficiente
+  ✔ saldo final 20.00 BRL, nunca negativo (versão 2)
+
+━━ 2. 50 requisições idênticas em paralelo nas três instâncias
+   respostas em 191 ms: 1× 201 (processada) e 49× 200 (replay da mesma resposta)
+  ✔ um único débito no ledger, saldo 90.00 BRL
+
+━━ 3. ROLLBACK chega antes da aposta que ele desfaz
+   ROLLBACK → HTTP 202 PENDING_REFERENCE
+   BET de 30.00 chega depois → HTTP 201 PROCESSED
+  ✔ aposta debitada e estornada, saldo de volta a 100.00 BRL (versão 3)
+
+━━ 4. Instância morre depois do commit e antes do ack no SQS
+   consumer-crash morreu com SIGKILL logo após o COMMIT
+  ✔ o débito foi gravado (saldo 60.00) e a mensagem continua na fila (1 mensagem)
+  ✔ a reentrega foi absorvida pelo inbox: um débito só, saldo 60.00 BRL
+
+━━ 5. Reconciliação e métricas
+  ✔ 4/4 carteiras da demo consistentes
+  ✔ verificação global no banco: saldo = Σ ledger e versão = última entrada, para todas as carteiras
+```
+
+</details>
+
+## Como funciona
+
+Toda transação, venha por HTTP ou pela fila, passa pelo mesmo caso de uso e vira **uma única transação SQL**: inbox, transação, saldo, ledger e eventos são confirmados juntos ou não são confirmados. Qualquer número de instâncias pode rodar lado a lado, porque nenhuma guarda estado entre requisições.
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"primaryColor": "#0E3B2E", "primaryTextColor": "#EDEFE6", "primaryBorderColor": "#C79A3A", "lineColor": "#6F8077", "clusterBkg": "transparent", "clusterBorder": "#A57E2A", "titleColor": "#A57E2A", "edgeLabelBackground": "#0E3B2E"}}}%%
+flowchart LR
+  HTTP["Provedor via HTTP<br/>Idempotency-Key"]
+  QUEUE[("wager-transactions.fifo")]
+  subgraph INST["cada instância (APP_ROLES)"]
+    API["API NestJS"]
+    CON["Consumidor SQS<br/>ack só após o commit"]
+    USE{{"SubmitWagerTransaction"}}
+    PEND["Worker de referências<br/>pendentes"]
+    PUB["Publisher da outbox"]
+  end
+  DB[("PostgreSQL<br/>wallets, ledger, transações,<br/>inbox, outbox")]
+  EVENTS[("wagering-events.fifo")]
+  DLQ[("DLQ")]
+
+  HTTP --> API --> USE
+  QUEUE --> CON --> USE
+  CON -. erro permanente .-> DLQ
+  USE == "uma transação SQL" ==> DB
+  PEND -- "backoff exponencial" --> DB
+  PUB -- "SKIP LOCKED" --> DB
+  PUB --> EVENTS
+```
+
+O caminho de uma aposta, do pedido ao evento:
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"actorBkg": "#0E3B2E", "actorTextColor": "#EDEFE6", "actorBorder": "#C79A3A", "actorLineColor": "#6F8077", "signalColor": "#6F8077", "signalTextColor": "#6F8077", "noteBkgColor": "#EDEFE6", "noteTextColor": "#1E2622", "noteBorderColor": "#C79A3A", "sequenceNumberColor": "#EDEFE6"}}}%%
+sequenceDiagram
+  autonumber
+  participant P as Provedor
+  participant I as Instância
+  participant DB as PostgreSQL
+  participant Q as Outbox e SQS
+  P->>I: POST com Idempotency-Key
+  I->>DB: key já vista? replay ou 409
+  I->>DB: SELECT wallet FOR UPDATE
+  I->>DB: relê a key sob o lock
+  Note over I: settleWager (regra pura)
+  I->>DB: saldo WHERE version, ledger, outbox
+  DB-->>I: COMMIT (trigger: saldo = ledger)
+  I-->>P: 201 PROCESSED
+  Q->>DB: outbox FOR UPDATE SKIP LOCKED
+  Q->>Q: publica, dedup por eventId
+```
+
+O porquê de cada escolha, as interpretações das regras e o que ficou de fora estão em [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+
+## Rodar
+
+### Tudo com Docker Compose
 
 ```bash
 docker compose up -d --build --scale app=3
 ```
 
-Isso sobe PostgreSQL, LocalStack (filas criadas por `docker/localstack/init-sqs.sh`), roda as migrations (`migrate`) e **três instâncias** da aplicação nas portas `3000`, `3001` e `3002`. Todas as instâncias executam API, consumidor SQS, publisher da outbox e worker de referências pendentes.
+Sobe PostgreSQL, LocalStack (filas criadas por `docker/localstack/init-sqs.sh`), roda as migrations e **três instâncias** nas portas `3000`, `3001` e `3002`. Todas executam API, consumidor SQS, publisher da outbox e worker de referências pendentes.
 
 ```bash
 curl localhost:3000/health/ready   # {"status":"up","checks":{"postgres":"up","sqs":"up"}}
 docker compose down -v             # derruba e apaga os volumes
 ```
 
-## Rodar localmente (fora de container)
+### Fora de container
+
+Requer Docker com Compose v2 e Bun ≥ 1.3.
 
 ```bash
 bun install
@@ -42,41 +169,25 @@ PORT=3001 bun run start
 PORT=3002 APP_ROLES=consumer,outbox bun run start   # só workers
 ```
 
-## Demonstração em 1 minuto
-
-```bash
-bun install && bun run infra:up && bun run migrate
-bun run demo
-```
-
-Sobe três instâncias reais (processos separados, mesmo PostgreSQL e SQS) e percorre, com saída legível e uma verificação em cada passo:
-
-1. o cenário obrigatório: saldo 100.00, duas apostas de 80.00 em paralelo em instâncias diferentes → uma `201`, outra `422 INSUFFICIENT_FUNDS`, saldo 20.00;
-2. 50 requisições idênticas em paralelo nas três instâncias → uma `201`, 49 replays `200`, um único débito;
-3. um `ROLLBACK` que chega antes da aposta → `202 PENDING_REFERENCE`, e o worker o processa quando a aposta aparece;
-4. um consumidor morto com `SIGKILL` depois do commit e antes do ack no SQS → a reentrega é absorvida pelo inbox;
-5. reconciliação de todas as wallets e um resumo das métricas Prometheus.
-
 ## Testes
 
-Os testes de integração e concorrência usam **PostgreSQL e LocalStack reais** (`bun run infra:up` antes). Nada é mockado.
+Os testes de integração, concorrência e resiliência usam **PostgreSQL e LocalStack reais** (`bun run infra:up` antes). Nada é mockado.
 
-```bash
-bun run test               # tudo, exceto resiliência (≈ 1 min)
-bun run test:unit          # domínio: Money, Wallet, regras de BET/WIN/LOSS/REFUND/ROLLBACK, hash, propriedades
-bun run test:properties    # property-based (fast-check): históricos aleatórios, fora de ordem e duplicados
-bun run test:integration   # constraints e migrations, API, SQS (inbox, retry, DLQ), outbox
-bun run test:concurrency   # paralelismo real, hot wallet, 3+ processos, crash e restart
-bun run test:resilience    # derruba o PostgreSQL e congela o SQS de verdade sob carga
-bun run test:load          # teste de carga (gera docs/load-test-results.md)
-bun run typecheck
-```
+| Comando | O que cobre |
+|---|---|
+| `bun run test` | tudo, exceto resiliência (≈ 1 min) |
+| `bun run test:unit` | domínio: `Money`, `Wallet`, regras de `BET`/`WIN`/`LOSS`/`REFUND`/`ROLLBACK`, hash, propriedades |
+| `bun run test:properties` | property-based (fast-check): históricos aleatórios, fora de ordem e duplicados |
+| `bun run test:integration` | constraints e migrations, API, SQS (inbox, retry, DLQ), outbox |
+| `bun run test:concurrency` | paralelismo real, hot wallet, 3+ processos, crash e restart |
+| `bun run test:resilience` | derruba o PostgreSQL e congela o SQS de verdade, sob carga |
+| `bun run test:load` | teste de carga, gera [`docs/load-test-results.md`](./docs/load-test-results.md) |
+| `bun run typecheck` | TypeScript estrito |
 
-Os testes de resiliência param os containers `wagering-processor-postgres-1` e `wagering-processor-localstack-1` (`docker kill`/`docker pause`) e os restauram ao final, por isso só rodam com `test:resilience`. Se os containers tiverem outro nome, use `POSTGRES_CONTAINER` e `LOCALSTACK_CONTAINER`.
+> [!NOTE]
+> Os testes de resiliência param os containers `wagering-processor-postgres-1` e `wagering-processor-localstack-1` (`docker kill` e `docker pause`) e os restauram ao final, por isso só rodam com `test:resilience`. Se os containers tiverem outro nome, use `POSTGRES_CONTAINER` e `LOCALSTACK_CONTAINER`.
 
-A CI ([`.github/workflows/ci.yml`](./.github/workflows/ci.yml)) roda typecheck, todas as suítes (inclusive resiliência) contra PostgreSQL e LocalStack reais, e o build da imagem Docker, a cada push e pull request.
-
-O mapa "cenário obrigatório → teste" está em [`ARCHITECTURE.md` §14](./ARCHITECTURE.md#14-testes).
+A [CI](./.github/workflows/ci.yml) roda typecheck, todas as suítes (inclusive resiliência) contra PostgreSQL e LocalStack reais e o build da imagem Docker, a cada push e pull request. O mapa "cenário obrigatório → teste" está em [`ARCHITECTURE.md` §14](./ARCHITECTURE.md#14-testes).
 
 ## API
 
@@ -92,7 +203,25 @@ O mapa "cenário obrigatório → teste" está em [`ARCHITECTURE.md` §14](./ARC
 | `GET` | `/health/live`, `/health/ready` | liveness e readiness (PostgreSQL + SQS), públicos |
 | `GET` | `/metrics` | métricas Prometheus |
 
-### Exemplo
+### Códigos HTTP (iguais em todos os endpoints)
+
+| Situação | Status | Reenviar? |
+|---|---|---|
+| processada (primeira vez) | `201` | não |
+| replay idempotente (mesma key, mesmo payload) | `200` + `idempotentReplay: true` | não |
+| aceita, aguardando referência (`PENDING_REFERENCE`) | `202` | não; consultar depois |
+| payload, header ou cursor inválido | `400` | não, corrigir |
+| wallet (no path ou no body) inexistente | `404` | não |
+| conflito de idempotência, `externalTransactionId` reutilizado, wallet duplicada | `409` | não |
+| rejeição de negócio persistida (`REJECTED` + `failureCode`) | `422` | não, é final |
+| falha transitória (banco indisponível, lock timeout) | `503` + `Retry-After` | **sim, igual** |
+| falha interna permanente (`FAILED`) | `500` | não |
+
+> [!TIP]
+> `503` é o único status que pede reenvio, e o reenvio deve usar a mesma `Idempotency-Key`. Erros têm o formato `{"error":{"code":"…","message":"…","retryable":false}}`; rejeições de negócio retornam o resultado da transação (`transactionId`, `status`, `failureCode`, `balance`).
+
+<details>
+<summary>Exemplo por HTTP</summary>
 
 ```bash
 curl -s -XPOST localhost:3000/wallets -H 'content-type: application/json' \
@@ -107,23 +236,10 @@ curl -s -XPOST localhost:3000/wagering/transactions -H 'content-type: applicatio
 # 201 {"transactionId":"…","status":"PROCESSED","balance":{"amount":"975.00","currency":"BRL"},"idempotentReplay":false}
 ```
 
-### Códigos HTTP (iguais em todos os endpoints)
+</details>
 
-| Situação | Status | Reenviar? |
-|---|---|---|
-| processada (primeira vez) | `201` | — |
-| replay idempotente (mesma key, mesmo payload) | `200` + `idempotentReplay: true` | — |
-| aceita, aguardando referência (`PENDING_REFERENCE`) | `202` | não; consultar depois |
-| payload/header/cursor inválido | `400` | não, corrigir |
-| wallet (no path ou no body) inexistente | `404` | não |
-| conflito de idempotência, `externalTransactionId` reutilizado, wallet duplicada | `409` | não |
-| rejeição de negócio persistida (`REJECTED` + `failureCode`) | `422` | não, é final |
-| falha transitória (banco indisponível, lock timeout) | `503` + `Retry-After` | **sim, igual** |
-| falha interna permanente (`FAILED`) | `500` | não |
-
-Erros têm o formato `{"error":{"code":"…","message":"…","retryable":false}}`. Rejeições de negócio retornam o resultado da transação (`transactionId`, `status`, `failureCode`, `balance`).
-
-### Mensagem SQS
+<details>
+<summary>Exemplo por SQS</summary>
 
 Fila `wager-transactions.fifo`, DLQ `wager-transactions-dlq.fifo`, eventos publicados em `wagering-events.fifo`.
 
@@ -137,7 +253,12 @@ docker compose exec localstack awslocal sqs send-message \
     "money":{"amount":"25.00","currency":"BRL"}}}'
 ```
 
+</details>
+
 ## Configuração
+
+<details>
+<summary>Variáveis de ambiente</summary>
 
 | Variável | Padrão | Uso |
 |---|---|---|
@@ -157,6 +278,8 @@ docker compose exec localstack awslocal sqs send-message \
 | `OUTBOX_BATCH_SIZE` / `OUTBOX_POLL_INTERVAL_MS` | `50` / `500` | publisher da outbox |
 | `LOG_LEVEL` | `info` | nível dos logs JSON |
 
+</details>
+
 ## Estrutura
 
 ```
@@ -168,5 +291,6 @@ src/
 test/
   unit/  integration/  concurrency/  resilience/  support/ (harness, geradores do fast-check)
 scripts/             migrate.ts, load-test.ts, demo.ts
+docs/                relatório de carga e as imagens deste README
 .github/workflows/   ci.yml
 ```

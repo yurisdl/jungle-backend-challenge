@@ -1,24 +1,43 @@
-# Arquitetura e decisões
+<p align="center">
+  <img src="docs/assets/architecture.svg" width="100%" alt="Arquitetura e decisões: como cada garantia é obtida, por que, e o que ficou de fora.">
+</p>
 
 Este documento explica **como** cada garantia do desafio é obtida, **por que** cada escolha foi feita e **o que ficou de fora**. A regra geral: o banco é a fonte da verdade e a última linha de defesa. Toda garantia que o README pede no schema está no schema, e o código de aplicação nunca é a única proteção.
 
+| Estrutura | Correção do saldo | Mensageria | Dados | Operação |
+|---|---|---|---|---|
+| [1. Visão geral](#1-visão-geral) | [4. Concorrência](#4-concorrência) | [9. SQS](#9-processamento-por-sqs) | [11. Ledger](#11-ledger) | [13. Observabilidade](#13-observabilidade) |
+| [2. Camadas](#2-camadas-e-boundaries) | [5. Idempotência](#5-idempotência) | [10. Outbox](#10-transactional-outbox) | [12. Invariantes no schema](#12-invariantes-no-schema-migration-migration20261120000001_initial_schema) | [14. Testes](#14-testes) |
+| [3. ORM e `Money`](#3-orm-mapeamento-do-money-e-estratégia-transacional) | [6. Regras de negócio](#6-modelo-de-transação-e-regras-de-negócio) | | | [15. Autenticação](#15-autenticação-decisão-não-implementada) |
+| | [7. Fora de ordem](#7-referências-fora-de-ordem) | | | [16. Trade-offs](#16-trade-offs-limitações-e-próximos-passos) |
+| | [8. Códigos de falha](#8-códigos-de-falha) | | | |
+
 ## 1. Visão geral
 
-```
-           HTTP (NestJS)                        SQS wager-transactions.fifo
-                │                                          │
-                ▼                                          ▼
-      WageringController ──┐                 WagerQueueConsumer (inbox, ack pós-commit, DLQ)
-                           ▼                                          │
-                 SubmitWagerTransaction  ◄────────────────────────────┘   (mesmo caso de uso)
-                           │  uma transação SQL
-     ┌─────────────────────┼──────────────────────┬───────────────┬───────────────┐
-     ▼                     ▼                      ▼               ▼               ▼
- inbox_messages   wager_transactions   wallets (FOR UPDATE)  wallet_ledger   outbox_messages
-                                                                                  │
-            PendingReferenceWorker (backoff) ──► RetryPendingReference            │
-                                                                                  ▼
-                                                     OutboxPublisher (SKIP LOCKED) ──► wagering-events.fifo
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"primaryColor": "#0E3B2E", "primaryTextColor": "#EDEFE6", "primaryBorderColor": "#C79A3A", "lineColor": "#6F8077", "clusterBkg": "transparent", "clusterBorder": "#A57E2A", "titleColor": "#A57E2A", "edgeLabelBackground": "#0E3B2E"}}}%%
+flowchart LR
+  HTTP["HTTP (NestJS)<br/>WageringController"]
+  QUEUE[("SQS<br/>wager-transactions.fifo")]
+  CON["WagerQueueConsumer<br/>inbox, ack pós-commit, DLQ"]
+  USE{{"SubmitWagerTransaction"}}
+  subgraph TX["uma transação SQL"]
+    INBOX[("inbox_messages")]
+    WTX[("wager_transactions")]
+    WAL[("wallets<br/>FOR UPDATE")]
+    LED[("wallet_ledger")]
+    OUT[("outbox_messages")]
+  end
+  PEND["PendingReferenceWorker<br/>backoff"]
+  RETRY{{"RetryPendingReference"}}
+  PUB["OutboxPublisher<br/>SKIP LOCKED"]
+  EVENTS[("wagering-events.fifo")]
+
+  HTTP --> USE
+  QUEUE --> CON --> USE
+  USE --> INBOX & WTX & WAL & LED & OUT
+  PEND --> RETRY --> WTX
+  OUT --> PUB --> EVENTS
 ```
 
 Cada instância roda os papéis configurados em `APP_ROLES` (`api`, `consumer`, `outbox`, `pending-reference`). Nenhum papel guarda estado entre requisições, então qualquer número de instâncias pode rodar lado a lado.
@@ -71,6 +90,25 @@ Como o ORM é usado:
 4. O banco recusa o resto: `CHECK (balance_amount >= 0)`, e uma trigger exige `version + 1` exatamente quando o saldo muda. Uma *constraint trigger* adiada para o commit exige que o estado da wallet seja explicado pelo lançamento do ledger com a mesma `version` (§12).
 5. Conflitos detectados pelo banco (deadlock, falha de serialização, corrida em índice único, versão divergente) re-executam **a transação inteira**, até 5 vezes com backoff aleatório curto. `lock_timeout` estourado vira erro transitório (`503` no HTTP, retry com backoff no SQS).
 
+O cenário obrigatório (saldo 100.00, duas apostas de 80.00 ao mesmo tempo em instâncias diferentes) acontece assim:
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"actorBkg": "#0E3B2E", "actorTextColor": "#EDEFE6", "actorBorder": "#C79A3A", "actorLineColor": "#6F8077", "signalColor": "#6F8077", "signalTextColor": "#6F8077", "noteBkgColor": "#EDEFE6", "noteTextColor": "#1E2622", "noteBorderColor": "#C79A3A", "sequenceNumberColor": "#EDEFE6"}}}%%
+sequenceDiagram
+  participant A as Instância A
+  participant DB as PostgreSQL
+  participant B as Instância B
+  A->>DB: SELECT wallet FOR UPDATE
+  B->>DB: SELECT wallet FOR UPDATE
+  Note over B,DB: B espera o lock de A
+  A->>DB: BET 80.00, saldo 20.00, version 2
+  A->>DB: COMMIT
+  DB-->>B: lock liberado, lê saldo 20.00
+  B->>DB: relê key e externalTransactionId
+  B->>DB: REJECTED INSUFFICIENT_FUNDS
+  B->>DB: COMMIT, saldo intacto
+```
+
 **Por que pessimista e não só otimista:** com uma *hot wallet* (muitas apostas no mesmo saldo), o otimismo puro gera uma tempestade de retries em que quase todo mundo perde. O lock de linha enfileira os concorrentes no PostgreSQL e garante progresso. A segurança não depende do lock: depende das constraints. O lock serve para eficiência e justiça.
 
 **Bulkhead por instância** (`KeyedSerializer`): dentro de uma instância, requisições para a mesma wallet esperam em fila FIFO em memória **antes** de pegar uma conexão do pool. Sem isso, 30 requisições para uma hot wallet ocupariam 30 conexões esperando o mesmo lock e deixariam as outras wallets sem conexão. Isso **não** é garantia de correção (outras instâncias não o veem, e a correção continua sendo do lock de linha e das constraints), nem cache de idempotência. O teste de carga mostra o efeito: com 20% do tráfego numa única wallet, o p95 das demais wallets fica em ~80 ms.
@@ -92,11 +130,25 @@ Como o ORM é usado:
 
 ## 6. Modelo de transação e regras de negócio
 
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"primaryColor": "#0E3B2E", "primaryTextColor": "#EDEFE6", "primaryBorderColor": "#C79A3A", "lineColor": "#6F8077", "transitionColor": "#6F8077", "transitionLabelColor": "#6F8077", "stateLabelColor": "#EDEFE6", "labelBackgroundColor": "transparent", "edgeLabelBackground": "transparent"}}}%%
+stateDiagram-v2
+  direction LR
+  [*] --> PENDING
+  PENDING --> PROCESSED
+  PENDING --> REJECTED
+  PENDING --> FAILED
+  PENDING --> PENDING_REFERENCE: referência ainda não chegou
+  PENDING_REFERENCE --> PENDING_REFERENCE: reagendada
+  PENDING_REFERENCE --> PROCESSED
+  PENDING_REFERENCE --> REJECTED
+  PENDING_REFERENCE --> FAILED
+  PROCESSED --> [*]
+  REJECTED --> [*]
+  FAILED --> [*]
 ```
-PENDING ──────────► PROCESSED | REJECTED | FAILED | PENDING_REFERENCE
-PENDING_REFERENCE ─► PROCESSED | REJECTED | FAILED | PENDING_REFERENCE (reagendada)
-PROCESSED, REJECTED, FAILED: terminais. Qualquer transição lança InvalidTransactionStateError (erro de programação).
-```
+
+`PROCESSED`, `REJECTED` e `FAILED` são terminais: qualquer transição a partir deles lança `InvalidTransactionStateError` (erro de programação).
 
 `PENDING` existe só em memória, entre a criação e a decisão, porque a decisão acontece na mesma transação SQL. No banco, uma trigger impede alterar campos de negócio de qualquer transação e qualquer UPDATE em transação terminal. `DELETE` é proibido em todas as tabelas financeiras.
 
@@ -111,7 +163,8 @@ PROCESSED, REJECTED, FAILED: terminais. Qualquer transição lança InvalidTrans
 
 A referência é resolvida por `(providerId, referenceExternalTransactionId)` e precisa ter o mesmo provider, player, wallet, moeda e rodada (senão `REFERENCE_MISMATCH`).
 
-**Interpretações adotadas** (o README pede que sejam documentadas):
+> [!IMPORTANT]
+> **Interpretações adotadas.** O README do desafio pede que elas sejam documentadas.
 
 1. **Uma referência é revertida no máximo uma vez, por qualquer tipo.** O README diz "não pode ser revertida duas vezes pelo mesmo tipo". Permitir `REFUND` e depois `ROLLBACK` da mesma `BET` creditaria a aposta duas vezes, então a regra adotada é mais estrita. É garantida no banco pelo índice único parcial `wager_tx_single_reversal_uq (reference_transaction_id) WHERE kind IN ('REFUND','ROLLBACK') AND status = 'PROCESSED'`. Um `ROLLBACK` de um `REFUND` é outra referência, então continua permitido.
 2. `ROLLBACK` de `LOSS` e de outro `ROLLBACK` não é permitido (`REFERENCE_KIND_NOT_ALLOWED`): `LOSS` não moveu saldo, e reverter uma reversão cria cadeias ambíguas.
@@ -251,7 +304,10 @@ Cada linha tem um teste em `test/integration/schema.test.ts`, executado com SQL 
 
 ## 15. Autenticação (decisão: não implementada)
 
-Autenticação não vale pontos, e o tempo foi investido em correção, concorrência e mensageria. O ponto de extensão está no código: `ProviderAuthGuard` (`interfaces/http/controllers.ts`) é um guard no-op aplicado a todos os endpoints de wallet e wagering. Health e métricas ficam sem guard.
+> [!NOTE]
+> Autenticação não vale pontos, e o tempo foi investido em correção, concorrência e mensageria.
+
+O ponto de extensão está no código: `ProviderAuthGuard` (`interfaces/http/controllers.ts`) é um guard no-op aplicado a todos os endpoints de wallet e wagering. Health e métricas ficam sem guard.
 
 Desenho que eu adotaria:
 
@@ -271,3 +327,7 @@ Desenho que eu adotaria:
 - **Moeda única nos dados:** o modelo e os testes são multi-moeda, mas a escala é fixa em 2 casas para todas as moedas (como o README define). Moedas com 0 ou 3 casas exigiriam escala por moeda.
 - **Retenção:** inbox e outbox publicada crescem indefinidamente. Em produção, um job de limpeza por idade (ex.: 14 dias, alinhado à retenção do SQS) resolveria.
 - **Teste de carga** roda numa única máquina (gerador, 3 instâncias, PostgreSQL e LocalStack dividindo 4 vCPUs). Os números são um piso, não capacidade. Ver `docs/load-test-results.md`.
+
+---
+
+<sub>Voltar ao [README](./README.md). Números do teste de carga em [`docs/load-test-results.md`](./docs/load-test-results.md).</sub>
