@@ -23,6 +23,12 @@ const CONNECTION_MESSAGES = [
   'terminating connection',
   'Connection ended',
   'Unable to connect',
+  'Connection ended unexpectedly',
+  'Connection Error',
+  'Query read timeout',
+  'timeout exceeded when trying to connect',
+  // knex reports this when the connection under a transaction died (query timeout / reset)
+  'Transaction query already complete',
 ];
 
 function find(error: unknown): PgLikeError | undefined {

@@ -15,7 +15,10 @@
     "test:unit": "bun test test/unit",
     "test:integration": "bun test test/integration",
     "test:concurrency": "bun test test/concurrency",
-    "test:load": "bun scripts/load-test.ts"
+    "test:properties": "bun test test/unit/wager-properties.test.ts",
+    "test:resilience": "RESILIENCE_TESTS=1 bun test test/resilience",
+    "test:load": "bun scripts/load-test.ts",
+    "demo": "bun scripts/demo.ts"
   },
   "dependencies": {
     "@aws-sdk/client-sqs": "3.1173.0",
@@ -34,6 +37,7 @@
     "@types/express": "5.0.6",
     "@types/node": "22.19.1",
     "bun-types": "1.4.5",
+    "fast-check": "3.23.2",
     "typescript": "5.9.3"
   }
 }

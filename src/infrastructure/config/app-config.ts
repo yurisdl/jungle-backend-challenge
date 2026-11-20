@@ -13,10 +13,13 @@ export interface AppConfig {
     poolMax: number;
     lockTimeoutMs: number;
     statementTimeoutMs: number;
+    connectTimeoutMs: number;
+    acquireTimeoutMs: number;
   };
   sqs: {
     endpoint?: string;
     region: string;
+    requestTimeoutMs: number;
     accessKeyId: string;
     secretAccessKey: string;
     autoCreateQueues: boolean;
@@ -69,10 +72,13 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       poolMax: int(env.DB_POOL_MAX, 20),
       lockTimeoutMs: int(env.DB_LOCK_TIMEOUT_MS, 5_000),
       statementTimeoutMs: int(env.DB_STATEMENT_TIMEOUT_MS, 15_000),
+      connectTimeoutMs: int(env.DB_CONNECT_TIMEOUT_MS, 3_000),
+      acquireTimeoutMs: int(env.DB_ACQUIRE_TIMEOUT_MS, 5_000),
     },
     sqs: {
       endpoint: env.SQS_ENDPOINT ?? 'http://localhost:4566',
       region: env.AWS_REGION ?? 'us-east-1',
+      requestTimeoutMs: int(env.SQS_REQUEST_TIMEOUT_MS, 5_000),
       accessKeyId: env.AWS_ACCESS_KEY_ID ?? 'test',
       secretAccessKey: env.AWS_SECRET_ACCESS_KEY ?? 'test',
       autoCreateQueues: (env.SQS_AUTO_CREATE_QUEUES ?? 'true') === 'true',

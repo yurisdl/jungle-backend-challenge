@@ -34,6 +34,15 @@ export function ormOptions(config: AppConfig): Options {
         );
       },
     },
+    // Client-side bounds: a frozen or unreachable database must surface as a
+    // transient error (503 / retry), never as a request hanging forever.
+    driverOptions: {
+      connection: {
+        query_timeout: config.database.statementTimeoutMs + 2_000,
+        connectionTimeoutMillis: config.database.connectTimeoutMs,
+      },
+      acquireConnectionTimeout: config.database.acquireTimeoutMs,
+    },
     // Decimal columns stay strings; timestamps come back as Date.
     forceUtcTimezone: true,
     // Identity map is never relied upon: each use case runs in its own fork.

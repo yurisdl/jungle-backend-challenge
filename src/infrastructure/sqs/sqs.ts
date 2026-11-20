@@ -12,7 +12,11 @@ export function createSqsClient(config: AppConfig): SQSClient {
     endpoint: config.sqs.endpoint,
     credentials: { accessKeyId: config.sqs.accessKeyId, secretAccessKey: config.sqs.secretAccessKey },
     maxAttempts: 2,
-    requestHandler: { requestTimeout: 25_000, connectionTimeout: 3_000 },
+    // long polls last waitTimeSeconds; every other call is bounded by requestTimeoutMs
+    requestHandler: {
+      requestTimeout: config.sqs.waitTimeSeconds * 1000 + config.sqs.requestTimeoutMs,
+      connectionTimeout: 3_000,
+    },
   });
 }
 
