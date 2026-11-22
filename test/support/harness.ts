@@ -64,6 +64,13 @@ export function ensureSchema(): Promise<void> {
   return schemaReady;
 }
 
+/**
+ * True when the process was killed abruptly. On POSIX that is SIGKILL; Windows
+ * has no signals, so a killed process only shows up as a non-zero exit code.
+ */
+export const diedAbruptly = (proc: { signalCode: NodeJS.Signals | number | null; exitCode: number | null }) =>
+  process.platform === 'win32' ? proc.exitCode !== 0 : proc.signalCode === 'SIGKILL';
+
 export async function startTestApp(env: Record<string, string> = {}): Promise<RunningApp & { baseUrl: string }> {
   await ensureSchema();
   const app = await startApplication(testConfig({ APP_ROLES: 'api', ...env }));

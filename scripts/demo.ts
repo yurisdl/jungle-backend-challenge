@@ -160,7 +160,7 @@ async function crashScenario(api: Instance, env: Record<string, string>) {
   say(`   mensagem ${dim(msg.messageId)} enviada para a fila`);
 
   await crashing.proc.exited;
-  say(`   ${crashing.name} morreu com ${red(String(crashing.proc.signalCode))} logo após o COMMIT`);
+  say(`   ${crashing.name} morreu com ${red(crashing.proc.signalCode ? String(crashing.proc.signalCode) : `código ${crashing.proc.exitCode}`)} logo após o COMMIT`);
   const after = await balanceOf(w);
   check(after.balance === '60.00', `o débito foi gravado (saldo ${after.balance}) e a mensagem continua na fila (${await queueDepth(urls.wager)} mensagem)`);
 

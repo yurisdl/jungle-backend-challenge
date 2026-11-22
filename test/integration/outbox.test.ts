@@ -5,6 +5,7 @@ import {
   assertGlobalConsistency,
   BASE_ENV,
   createWallet,
+  diedAbruptly,
   drain,
   queueEnv,
   ROOT,
@@ -40,6 +41,16 @@ async function produceEvents(wallets: number, betsPerWallet: number): Promise<st
     }),
   );
   return ids;
+}
+
+/** Publishes whatever earlier tests left pending, so the next test starts from an empty outbox. */
+async function drainOutbox() {
+  const publisher = await startTestApp({ ...env, APP_ROLES: '' });
+  try {
+    while ((await publisher.container.outboxPublisher.publishBatch()) > 0);
+  } finally {
+    await publisher.stop();
+  }
 }
 
 async function pendingFor(aggregateIds: string[]) {
@@ -157,7 +168,7 @@ describe('transactional outbox', () => {
       stderr: 'pipe',
     });
     await child.exited;
-    expect(child.signalCode).toBe('SIGKILL');
+    expect(diedAbruptly(child)).toBe(true);
 
     // the SQS send happened, the commit did not: rows are still pending
     const afterCrash = await pendingFor(walletIds);
@@ -177,6 +188,7 @@ describe('transactional outbox', () => {
   }, 60_000);
 
   test('an event waiting for retry is never overtaken by a later event of the same wallet', async () => {
+    await drainOutbox(); // the injected rejection must hit this wallet's first event, not a leftover
     const [walletId] = await produceEvents(1, 3);
     const { total } = await pendingFor([walletId!]);
     // SQS refuses the first event (OPENING's WalletBalanceChanged); everything after it must wait

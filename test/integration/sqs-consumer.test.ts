@@ -179,12 +179,14 @@ describe('SQS consumer, ack failure after commit', () => {
       await waitFor(async () => (await txStatus(w.id, `ack-${w.id}`))?.status === 'PROCESSED', { label: 'processed' });
 
       // the message comes back after its visibility timeout and is acked as a duplicate
+      // (wait for the ack itself: the duplicate is counted a moment before it)
       const metrics = async () => flaky.container.metrics.registry.metrics();
-      await waitFor(async () => (await metrics()).includes('wager_duplicates_total{source="sqs"'), {
+      await waitFor(async () => (await metrics()).includes('sqs_messages_total{outcome="acked"} 1'), {
         label: 'redelivery absorbed',
         timeoutMs: 20_000,
       });
       const text = await metrics();
+      expect(text).toContain('wager_duplicates_total{source="sqs",type="inbox"} 1');
       expect(text).toContain('sqs_messages_total{outcome="ack-failed"} 1');
       expect(text).toContain('sqs_messages_total{outcome="acked"} 1');
       // before the fix the failed delete went down the transient-failure path

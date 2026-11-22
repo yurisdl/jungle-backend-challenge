@@ -5,6 +5,7 @@ import type { QueueUrls } from '../../src/infrastructure/sqs/sqs';
 import {
   assertGlobalConsistency,
   createWallet,
+  diedAbruptly,
   type Instance,
   queueEnv,
   sendMessage,
@@ -141,7 +142,7 @@ describe('multiple instances (separate OS processes)', () => {
     await sendMessage(sqs, urls.wager, msg);
 
     await crashing.proc.exited;
-    expect(crashing.proc.signalCode).toBe('SIGKILL');
+    expect(diedAbruptly(crashing.proc)).toBe(true);
     // committed: debit + inbox are there, but the message was never deleted
     let state = await walletState(w.id);
     expect(state.wallet.balance).toBe('60.00');
@@ -178,7 +179,9 @@ describe('multiple instances (separate OS processes)', () => {
     await y.kill('SIGKILL'); // abrupt death: in-flight messages come back after the visibility timeout
     const graceful = z.kill('SIGTERM'); // graceful: finishes in-flight work, releases the rest
     await sendBatch(150);
-    expect(await graceful).toBe(0);
+    const gracefulExit = await graceful;
+    // Windows has no SIGTERM: z dies abruptly there too, and convergence is still checked below
+    if (process.platform !== 'win32') expect(gracefulExit).toBe(0);
 
     await start('instance-y2');
     await start('instance-z2');

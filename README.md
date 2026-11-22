@@ -228,13 +228,18 @@ A [CI](./.github/workflows/ci.yml) roda typecheck, todas as suítes (inclusive r
 <summary>Exemplo por HTTP</summary>
 
 ```bash
-curl -s -XPOST localhost:3000/wallets -H 'content-type: application/json' \
-  -d '{"playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","initialBalance":{"amount":"1000.00","currency":"BRL"}}'
+PLAYER=0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1
+
+# cria a wallet e guarda o "id" da resposta em WALLET
+# {"id":"…","playerId":"…","balance":{"amount":"1000.00","currency":"BRL"},"version":1}
+WALLET=$(curl -s -XPOST localhost:3000/wallets -H 'content-type: application/json' \
+  -d '{"playerId":"'"$PLAYER"'","initialBalance":{"amount":"1000.00","currency":"BRL"}}' \
+  | sed -E 's/.*"id":"([^"]+)".*/\1/')
 
 curl -s -XPOST localhost:3000/wagering/transactions -H 'content-type: application/json' \
   -H 'Idempotency-Key: provider-a:transaction-123' \
   -d '{"providerId":"provider-a","externalTransactionId":"transaction-123",
-       "playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","walletId":"<id da wallet>",
+       "playerId":"'"$PLAYER"'","walletId":"'"$WALLET"'",
        "roundId":"round-987","gameId":"fortune-chimp","kind":"BET",
        "money":{"amount":"25.00","currency":"BRL"}}'
 # 201 {"transactionId":"…","status":"PROCESSED","balance":{"amount":"975.00","currency":"BRL"},"idempotentReplay":false}
@@ -245,16 +250,17 @@ curl -s -XPOST localhost:3000/wagering/transactions -H 'content-type: applicatio
 <details>
 <summary>Exemplo por SQS</summary>
 
-Fila `wager-transactions.fifo`, DLQ `wager-transactions-dlq.fifo`, eventos publicados em `wagering-events.fifo`.
+Fila `wager-transactions.fifo`, DLQ `wager-transactions-dlq.fifo`, eventos publicados em `wagering-events.fifo`. Usa `PLAYER` e `WALLET` do exemplo por HTTP; o grupo FIFO é a wallet.
 
 ```bash
 docker compose exec localstack awslocal sqs send-message \
   --queue-url http://localhost:4566/000000000000/wager-transactions.fifo \
-  --message-group-id <walletId> --message-deduplication-id msg-123 \
+  --message-group-id "$WALLET" --message-deduplication-id msg-123 \
   --message-body '{"messageId":"msg-123","type":"WagerTransactionRequested","occurredAt":"2026-07-29T15:00:00.000Z",
     "data":{"providerId":"provider-a","externalTransactionId":"transaction-124","idempotencyKey":"provider-a:transaction-124",
-    "playerId":"…","walletId":"…","roundId":"round-987","gameId":"fortune-chimp","kind":"BET",
+    "playerId":"'"$PLAYER"'","walletId":"'"$WALLET"'","roundId":"round-987","gameId":"fortune-chimp","kind":"BET",
     "money":{"amount":"25.00","currency":"BRL"}}}'
+curl -s localhost:3000/wallets/$WALLET   # em instantes: saldo 950.00, version 3
 ```
 
 </details>
