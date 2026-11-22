@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "migrate": "bun scripts/migrate.ts up",
     "migrate:down": "bun scripts/migrate.ts down",
-    "infra:up": "docker compose up -d postgres localstack",
+    "infra:up": "docker compose up -d --wait postgres localstack",
     "infra:down": "docker compose down -v",
     "test": "bun test",
     "test:unit": "bun test test/unit",
