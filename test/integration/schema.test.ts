@@ -88,7 +88,10 @@ describe('migrations', () => {
     const orm = await MikroORM.init(ormOptions(testConfig({ DATABASE_URL: url })));
     try {
       const migrator = orm.getMigrator();
-      expect((await migrator.up()).map((m) => m.name)).toEqual(['Migration20261120000001_initial_schema']);
+      expect((await migrator.up()).map((m) => m.name)).toEqual([
+        'Migration20261120000001_initial_schema',
+        'Migration20261122000001_outbox_aggregate_order',
+      ]);
       const tables = async () =>
         (
           await orm.em
@@ -98,7 +101,7 @@ describe('migrations', () => {
             )
         ).map((r) => r.t);
       expect(await tables()).toEqual(['inbox_messages', 'outbox_messages', 'wager_transactions', 'wallet_ledger_entries', 'wallets']);
-      await migrator.down();
+      await migrator.down({ to: 0 });
       expect(await tables()).toEqual([]);
       await migrator.up();
       expect((await tables()).length).toBe(5);

@@ -30,7 +30,7 @@ flowchart LR
   end
   PEND["PendingReferenceWorker<br/>backoff"]
   RETRY{{"RetryPendingReference"}}
-  PUB["OutboxPublisher<br/>SKIP LOCKED"]
+  PUB["OutboxPublisher<br/>em ordem por wallet"]
   EVENTS[("wagering-events.fifo")]
 
   HTTP --> USE
@@ -60,7 +60,7 @@ Cada instância roda os papéis configurados em `APP_ROLES` (`api`, `consumer`, 
 
 **MikroORM 6**, como o README recomenda. Os motivos:
 
-- `EntityManager.transactional()` com nível de isolamento explícito, `LockMode.PESSIMISTIC_WRITE` (`FOR UPDATE`) e `PESSIMISTIC_PARTIAL_WRITE` (`FOR UPDATE SKIP LOCKED`), que são exatamente os dois locks de que o desenho precisa;
+- `EntityManager.transactional()` com nível de isolamento explícito e `LockMode.PESSIMISTIC_WRITE` (`FOR UPDATE`), o lock por wallet de que o desenho precisa. SQL cru fica para os dois pontos em que ele é mais claro que o ORM: o `INSERT … ON CONFLICT` da inbox e a reivindicação de wallets da outbox com advisory lock;
 - `EntitySchema` permite mapear sem decorators, mantendo o domínio limpo;
 - migrations versionadas e reversíveis via `@mikro-orm/migrations`, listadas explicitamente (`migrationsList`), sem descoberta por filesystem em runtime.
 
@@ -126,6 +126,7 @@ sequenceDiagram
 - Mesmo `(providerId, externalTransactionId)` sob outra key é conflito (`409 EXTERNAL_TRANSACTION_CONFLICT`). Duas keys para a mesma operação do provedor seriam um débito duplicado em potencial.
 - No banco: `UNIQUE (idempotency_key)` e `UNIQUE (provider_id, external_transaction_id)`. Se duas instâncias inserirem ao mesmo tempo, a segunda recebe violação de unicidade, a transação é re-executada e cai no caminho de replay ou conflito.
 - No SQS existe uma segunda camada: a **inbox** `(consumer_name, message_id)`, inserida com `ON CONFLICT DO NOTHING` **na mesma transação** da mudança financeira. A mesma mensagem reentregue é descartada sem tocar em nada. Mensagens diferentes com a mesma key caem no replay normal.
+- A inbox guarda o hash do `data` da mensagem e o compara quando o `messageId` se repete. Mesmo `messageId` com conteúdo diferente não é duplicata: é um erro do produtor, e a mensagem vai para a DLQ com `INBOX_MESSAGE_CONFLICT` em vez de ser confirmada em silêncio.
 - Nada disso usa memória: tudo é estado persistido.
 
 ## 6. Modelo de transação e regras de negócio
@@ -170,17 +171,19 @@ A referência é resolvida por `(providerId, referenceExternalTransactionId)` e 
 2. `ROLLBACK` de `LOSS` e de outro `ROLLBACK` não é permitido (`REFERENCE_KIND_NOT_ALLOWED`): `LOSS` não moveu saldo, e reverter uma reversão cria cadeias ambíguas.
 3. Referência que existe mas está `REJECTED` ou `FAILED` resulta em `REFERENCE_NOT_PROCESSED`. Referência que existe mas ainda está `PENDING_REFERENCE` mantém a dependente pendente.
 4. Wallet inexistente (no path ou no corpo) é `404 WALLET_NOT_FOUND` e **não** é persistida: não há wallet para associar e auditar. No SQS, a mensagem vai para a DLQ com esse motivo.
-5. Player diferente do dono da wallet é `REJECTED` (`PLAYER_WALLET_MISMATCH`), persistido e auditável.
+5. Player diferente do dono da wallet é `REJECTED` (`PLAYER_WALLET_MISMATCH`), persistido e auditável. A resposta e o evento levam `balance: null`: quem informa a wallet de outro jogador não descobre o saldo dela.
 6. Valor zero só é aceito em `LOSS`. Os outros tipos exigem `> 0`.
 7. Reversão que deixaria o saldo negativo é `REJECTED` com `REVERSAL_INSUFFICIENT_FUNDS`, distinto de `INSUFFICIENT_FUNDS`, e fica auditável.
 8. Rejeições de negócio não geram ledger nem alteram saldo. Geram o evento `WagerTransactionRejected`.
+9. **Uma `BET` é paga ou revertida, nunca as duas coisas.** `WIN` ou `LOSS` de uma `BET` que já teve `REFUND` ou `ROLLBACK` é `REJECTED` com `REFERENCE_ALREADY_REVERSED`: a rodada foi cancelada. No sentido contrário, `REFUND` ou `ROLLBACK` de uma `BET` que já pagou um `WIN` é `REJECTED` com `REFERENCE_ALREADY_SETTLED`, porque devolveria a aposta por cima do prêmio. O provedor desfaz o `WIN` primeiro (`ROLLBACK` do `WIN`) e então pode estornar a `BET`. `LOSS` não bloqueia o estorno, porque não moveu saldo. As duas verificações rodam sob o lock da wallet, que é a mesma da referência.
 
 ## 7. Referências fora de ordem
 
 - `REFUND`, `ROLLBACK` (e `WIN`/`LOSS` com referência) que chegam antes da referência são persistidos como `PENDING_REFERENCE`, com `next_attempt_at` e `attempts`, e emitem `WagerTransactionPendingReference`. A resposta é `202`.
 - O `PendingReferenceWorker` (agendado, roda em qualquer número de instâncias) busca as pendentes vencidas e reprocessa cada uma em sua própria transação, com o mesmo `settleWager`.
 - **Backoff exponencial:** `min(2 s × 2^tentativa, 5 min)`, **10 tentativas**, cerca de 17 minutos no total. A justificativa: em entregas at-least-once, a referência costuma chegar segundos depois, e uma janela de ~17 min cobre redeliveries do SQS (visibilidade de 30 s com até 5 recebimentos) e incidentes curtos de um provedor sem deixar transações pendentes por horas. Tudo é configurável por env.
-- **Atalho:** quando uma transação é processada, a mesma transação SQL antecipa `next_attempt_at` das dependentes que esperam por ela (`wakeDependents`). Na prática, a reversão é aplicada no próximo ciclo do worker (~1 s), não no próximo degrau do backoff.
+- **Atalho:** quando uma transação termina (processada, rejeitada ou com falha), a mesma transação SQL antecipa `next_attempt_at` das dependentes que esperam por ela (`wakeDependents`). Na prática, a dependente é decidida no próximo ciclo do worker (~1 s), não no próximo degrau do backoff: aplicada se a referência foi processada, `REFERENCE_NOT_PROCESSED` se não foi.
+- **Falha técnica no reprocessamento** (lock timeout, banco fora, bug): a tentativa é contada e `next_attempt_at` vai para o próximo degrau do backoff, numa transação separada. Assim uma pendente que sempre falha não fica no topo da fila travando as outras. Esgotadas as tentativas, ela termina `FAILED` com `PROCESSING_RETRIES_EXHAUSTED`, sem tocar em saldo, ledger ou eventos.
 - **Esgotado o limite**, a transação vira `REJECTED` com `REFERENCE_NOT_FOUND`, e o evento `WagerTransactionRejected` é publicado.
 
 ## 8. Códigos de falha
@@ -196,8 +199,9 @@ A referência é resolvida por `(providerId, referenceExternalTransactionId)` e 
 | `REFERENCE_KIND_NOT_ALLOWED` | `REJECTED` | tipo de referência inválido para a operação |
 | `REFERENCE_NOT_PROCESSED` | `REJECTED` | referência rejeitada/falha; nada a reverter |
 | `REFERENCE_AMOUNT_MISMATCH` | `REJECTED` | reversão parcial não é suportada |
-| `REFERENCE_ALREADY_REVERSED` | `REJECTED` | já revertida; final |
-| `PROCESSING_RETRIES_EXHAUSTED` | `FAILED` | falha de infraestrutura persistente (mensagem na DLQ); operação manual |
+| `REFERENCE_ALREADY_REVERSED` | `REJECTED` | aposta já estornada (não há o que reverter nem pagar); final |
+| `REFERENCE_ALREADY_SETTLED` | `REJECTED` | aposta já paga por um `WIN`; fazer `ROLLBACK` do `WIN` antes de estornar |
+| `PROCESSING_RETRIES_EXHAUSTED` | `FAILED` | falha de infraestrutura persistente (mensagem na DLQ, ou pendente que falhou em todas as tentativas); operação manual |
 | `INTERNAL_INVARIANT_VIOLATION` | `FAILED` | o banco recusou um estado impossível (bug); operação manual |
 
 Erros que **não** viram transação (não há o que persistir) usam `error.code`: `INVALID_PAYLOAD`, `IDEMPOTENCY_KEY_REQUIRED`, `KIND_NOT_ALLOWED`, `INVALID_CURSOR`, `WALLET_NOT_FOUND`, `NOT_FOUND`, `IDEMPOTENCY_KEY_CONFLICT`, `EXTERNAL_TRANSACTION_CONFLICT`, `WALLET_ALREADY_EXISTS`, `TRANSIENT_INFRASTRUCTURE_ERROR`, `CONCURRENCY_CONFLICT`, `INTERNAL_ERROR`. O campo `retryable` diz se reenviar a mesma requisição pode funcionar. O mapeamento HTTP está no [README](./README.md#códigos-http-iguais-em-todos-os-endpoints) e em `interfaces/http/error-mapping.ts`: cada situação tem um único status, igual em todos os endpoints, e o provedor nunca precisa ler a mensagem para decidir se reenvia.
@@ -209,10 +213,11 @@ Erros que **não** viram transação (não há o que persistir) usam `error.code
 - Long polling, até 10 mensagens. Mensagens do mesmo `MessageGroupId` são processadas em sequência, e grupos diferentes em paralelo.
 - Valida o envelope e o `data` com **o mesmo parser** do HTTP e chama **o mesmo caso de uso** (`SubmitWagerTransaction`), com o contexto da inbox.
 - **Ack (`DeleteMessage`) somente depois do commit.** Se o processo morrer entre o commit e o ack, a mensagem volta após o visibility timeout, bate na inbox e é só confirmada. Existe um teste que mata o processo exatamente nesse ponto.
+- **Falha no próprio ack** (rede, receipt handle expirado) não é falha de processamento: a transação já foi confirmada. A falha é registrada (`sqs_messages_total{outcome="ack-failed"}`), a mensagem volta e a inbox a reconhece. Antes ela caía no caminho de erro transitório e, no último recebimento, ia para a DLQ como `RETRIES_EXHAUSTED` uma transação que tinha dado certo.
 - **Classificação de erros:**
   - **negócio** (`PROCESSED`, `REJECTED`, `PENDING_REFERENCE`, replay, mensagem duplicada): ack;
   - **transitório** (banco fora, `lock_timeout`, conflito que esgotou os retries internos, erro desconhecido): `ChangeMessageVisibility` com backoff `min(base × 2^(n-1), 300 s)`. As mensagens seguintes do mesmo grupo são devolvidas para manter a ordem;
-  - **permanente** (JSON inválido, tipo desconhecido, payload inválido, wallet inexistente, conflito de idempotência, violação de invariante): envio explícito à DLQ com o atributo `deadLetterReason`, depois ack;
+  - **permanente** (JSON inválido, tipo desconhecido, payload inválido, wallet inexistente, conflito de idempotência, `messageId` reutilizado com outro conteúdo, violação de invariante): envio explícito à DLQ com o atributo `deadLetterReason`, depois ack;
   - **limite de tentativas:** ao atingir `SQS_MAX_RECEIVE_COUNT` recebimentos, a mensagem vai para a DLQ com `RETRIES_EXHAUSTED`, e a transação é registrada como `FAILED` (`PROCESSING_RETRIES_EXHAUSTED`) quando o banco permite (best effort; se o problema for o próprio banco, a DLQ é a trilha de auditoria). A fila também tem `RedrivePolicy` com o mesmo `maxReceiveCount`, como rede de segurança para *poison pills* que derrubam o processo.
 - **SIGTERM:** para de buscar mensagens (aborta o long poll), conclui as mensagens em andamento e devolve as recebidas e não iniciadas com visibilidade 0. Depois fecha HTTP e pools. Verificado no teste de restart (`SIGTERM` sai com código 0) e com `docker compose stop`.
 
@@ -220,12 +225,17 @@ Erros que **não** viram transação (não há o que persistir) usam `error.code
 
 - Eventos são gravados em `outbox_messages` **na mesma transação** que a inbox, a transação, a wallet e o ledger. Ou tudo é confirmado junto, ou nada é. Um teste injeta uma falha depois de todas as escritas e verifica que nada ficou.
 - **O id do outbox é o `eventId`.** Uma republicação carrega a mesma identidade.
-- `OutboxPublisher`: em uma transação, faz `SELECT … WHERE published_at IS NULL AND next_attempt_at <= now() ORDER BY occurred_at FOR UPDATE SKIP LOCKED LIMIT n`, envia com `SendMessageBatch` (`MessageGroupId = aggregateId`, `MessageDeduplicationId = eventId`), marca `published_at` e faz commit.
-  - **vários publishers concorrentes** nunca pegam a mesma linha (`SKIP LOCKED`); testado com dois publishers em paralelo, cada evento publicado exatamente uma vez;
-  - **processo morre antes de publicar:** a linha está commitada e outra instância a publica; testado;
-  - **processo morre depois de enviar e antes do commit:** o rollback devolve as linhas, e outra instância reenvia com o mesmo `eventId`. A dedup da FIFO absorve o reenvio dentro de 5 minutos, e fora dessa janela o consumidor deduplica por `eventId`. Entrega at-least-once, nunca perde. Testado com `SIGKILL` real nesse ponto;
-  - **SQS recusa ou fica fora:** `scheduleRetry` com backoff exponencial (`attempts`, `next_attempt_at`, `last_error`); testado.
-- Ordem por wallet preservada pelo grupo FIFO (`aggregateId = walletId`); verificado pelo `walletVersion` crescente dos eventos.
+- **A ordem é por wallet**, e é ela que os consumidores precisam: `WalletBalanceChanged` da versão 3 nunca pode chegar antes da versão 2. O `OutboxPublisher` trabalha por agregado, não por linha, em uma transação que fica aberta durante o envio:
+  1. escolhe as wallets cujo evento **mais antigo** ainda não publicado está vencido e reivindica cada uma com `pg_try_advisory_xact_lock`. Uma wallet é publicada por um publisher de cada vez, em qualquer número de instâncias, e a que está com outro publisher é pulada, sem espera;
+  2. lê os eventos pendentes dessas wallets em ordem (`occurred_at, id`), alternando entre elas para que nenhuma monopolize o lote;
+  3. envia com `SendMessageBatch` (`MessageGroupId = aggregateId`, `MessageDeduplicationId = eventId`), **no máximo um evento por wallet em cada chamada**, e para a wallet no primeiro evento recusado. Os seguintes ficam intocados e saem depois do retry, atrás dele;
+  4. marca `published_at` e faz commit. O índice parcial `outbox_pending_by_aggregate_idx (aggregate_id, occurred_at, id) WHERE published_at IS NULL` atende as duas leituras.
+- O que isso cobre, com teste para cada caso:
+  - **vários publishers concorrentes:** cada evento publicado exatamente uma vez e em ordem por wallet;
+  - **SQS recusa um evento do meio:** `scheduleRetry` com backoff exponencial (`attempts`, `next_attempt_at`, `last_error`), e os eventos seguintes da mesma wallet esperam por ele. O teste recusa o primeiro evento e confere a ordem recebida, evento por evento;
+  - **processo morre antes de publicar:** a linha está commitada e outra instância a publica;
+  - **processo morre depois de enviar e antes do commit:** o rollback libera as wallets, e outra instância reenvia com o mesmo `eventId`. A dedup da FIFO absorve o reenvio dentro de 5 minutos, e fora dessa janela o consumidor deduplica por `eventId`. Entrega at-least-once, nunca perde. Testado com `SIGKILL` real nesse ponto.
+- O custo: uma wallet muito ativa publica um evento por chamada ao SQS. No teste de carga (hot wallet com 20% do tráfego), a outbox esvazia em 0,2 s depois da carga.
 - Eventos: `WagerTransactionProcessed` (inclusive `LOSS`), `WagerTransactionRejected`, `WalletBalanceChanged` (só quando o saldo muda, inclusive na abertura) e `WagerTransactionPendingReference`. Cada um é uma subclasse de `IntegrationEvent<T>` com `eventType` e `version` no tipo. `data` carrega `MoneyProps`, nunca `Money`.
 
 ## 11. Ledger
@@ -235,7 +245,7 @@ Erros que **não** viram transação (não há o que persistir) usam `error.code
 - Uma transação gera no máximo um lançamento por wallet (`UNIQUE (wallet_id, transaction_id)`). `LOSS` e rejeições não geram lançamento.
 - Partidas dobradas não foram implementadas (diferencial opcional, §16).
 
-## 12. Invariantes no schema (migration `Migration20261120000001_initial_schema`)
+## 12. Invariantes no schema (migrations em `infrastructure/persistence/migrations`)
 
 | Garantia | Mecanismo no PostgreSQL |
 |---|---|
@@ -254,7 +264,7 @@ Erros que **não** viram transação (não há o que persistir) usam `error.code
 | transação terminal e campos de negócio imutáveis; nada é apagado | triggers `wager_tx_guard_immutable` e `forbid_delete` |
 | inbox deduplicada | `PRIMARY KEY (consumer_name, message_id)` |
 
-Cada linha tem um teste em `test/integration/schema.test.ts`, executado com SQL cru para provar que a proteção está no banco, não no código. A migration é reversível (`down` remove tudo); o teste aplica `up → down → up` num banco descartável.
+Cada linha tem um teste em `test/integration/schema.test.ts`, executado com SQL cru para provar que a proteção está no banco, não no código. As migrations são reversíveis (`down` remove tudo); o teste aplica `up → down → up` num banco descartável.
 
 ## 13. Observabilidade
 
@@ -265,11 +275,11 @@ Cada linha tem um teste em `test/integration/schema.test.ts`, executado com SQL 
   - `wager_idempotency_conflicts_total`;
   - `wager_retries_total{operation,reason}`;
   - `wallet_lock_conflicts_total{kind}`: lock timeout, deadlock, serialização, versão, corrida de índice único;
-  - `sqs_dlq_messages_total{reason}` e `sqs_messages_total{outcome}`;
+  - `sqs_dlq_messages_total{reason}` e `sqs_messages_total{outcome}` (`acked`, `ack-failed`, `retry-scheduled`, `dead-lettered`, `released`);
   - `outbox_lag_seconds` (idade do evento pendente mais antigo), `outbox_pending_messages`, `outbox_published_total`, `outbox_publish_failures_total`;
   - `wager_processing_duration_seconds{source}` (histograma de latência);
   - `wallet_reconciliation_divergences_total`;
-  - `wager_pending_reference_transactions`.
+  - `wager_pending_reference_transactions` (todas as que esperam referência, vencidas ou não).
 - **Health:** `/health/live` diz só se o processo está vivo. `/health/ready` checa PostgreSQL (`select 1`) e SQS (`GetQueueAttributes`), com timeout de 2 s cada, e responde `503` se algum estiver fora. Os dois são públicos.
 - **Reconciliação** (`POST /wallets/:id/reconciliation`): em snapshot `REPEATABLE READ`, compara o saldo armazenado com Σcréditos − Σdébitos e com o `balance_after`/`version` do último lançamento. Uma divergência nunca é corrigida: é logada em `error`, contada em métrica e sinalizada na resposta (`consistent: false`).
 
@@ -295,10 +305,17 @@ Cada linha tem um teste em `test/integration/schema.test.ts`, executado com SQL 
 | PostgreSQL derrubado (`docker kill`) no meio da carga, HTTP + SQS | `test/resilience/infra-outage.test.ts` |
 | SQS congelado (`docker pause`): HTTP segue, outbox acumula e drena | `test/resilience/infra-outage.test.ts` |
 | históricos aleatórios fora de ordem e com duplicatas (property-based) | `test/unit/wager-properties.test.ts` |
+| uma `BET` nunca é paga e estornada ao mesmo tempo | `wager-rules.test.ts`, `wager-properties.test.ts`, `api.test.ts` |
+| wallet de outro jogador não revela o saldo | `wager-rules.test.ts`, `api.test.ts` |
+| ordem por wallet quando o SQS recusa um evento do meio | `test/integration/outbox.test.ts` |
+| `messageId` reutilizado com outro conteúdo vai para a DLQ | `test/integration/sqs-consumer.test.ts` |
+| falha no ack depois do commit não vira falha de processamento | `test/integration/sqs-consumer.test.ts` |
+| pendente que sempre falha não trava a fila; termina `FAILED`; dependentes de rejeitada acordam | `test/integration/pending-reference.test.ts` |
+| workers ociosos não acumulam listeners | `test/unit/polling-worker.test.ts` |
 
 - **Invariante final:** todo arquivo de integração e concorrência termina com `assertGlobalConsistency()`, que verifica `wallet.balance == Σ ledger` e `version == último wallet_version` para **todas** as wallets do banco, não só as do teste.
 - Paralelismo real: requisições HTTP simultâneas contra um PostgreSQL real e, nos testes multi-instância, processos `bun` separados criados com `Bun.spawn`. A falha "depois do commit e antes do ack" é injetada por `FAULT_INJECTION=crash-after-commit`, que faz `SIGKILL` no próprio processo naquele ponto exato. É um hook que só existe se a variável estiver definida.
-- **Property-based (fast-check):** em vez de escolher exemplos, o gerador (`test/support/wager-arbitraries.ts`) cria históricos aleatórios de `BET`/`WIN`/`LOSS`/`REFUND`/`ROLLBACK` com referências para trás, para frente e para ids que nunca chegam, valores coerentes ou não com a referência, e um plano de entrega embaralhado com duplicatas. O teste aplica cada entrega com `settleWager`, a mesma função pura usada em produção, e reprocessa as pendentes como o worker faz. Em cada passo e no final, verifica: saldo nunca negativo; saldo = Σ ledger; uma versão por lançamento; uma transação por `externalTransactionId`; toda transação termina em estado terminal coerente; reversões só valem para a operação certa, uma vez, no sentido oposto; referência inexistente termina em `REFERENCE_NOT_FOUND`. Também verifica que, só com créditos, a ordem de entrega não muda o saldo final, e que a aritmética de `Money` é exata e sobrevive ao formato de fio. Quando uma propriedade falha, o fast-check reduz o histórico ao menor contraexemplo e imprime a semente para reproduzir.
+- **Property-based (fast-check):** em vez de escolher exemplos, o gerador (`test/support/wager-arbitraries.ts`) cria históricos aleatórios de `BET`/`WIN`/`LOSS`/`REFUND`/`ROLLBACK` com referências para trás, para frente e para ids que nunca chegam, valores coerentes ou não com a referência, e um plano de entrega embaralhado com duplicatas. O teste aplica cada entrega com `settleWager`, a mesma função pura usada em produção, e reprocessa as pendentes como o worker faz. Em cada passo e no final, verifica: saldo nunca negativo; saldo = Σ ledger; uma versão por lançamento; uma transação por `externalTransactionId`; toda transação termina em estado terminal coerente; reversões só valem para a operação certa, uma vez, no sentido oposto; nenhuma `BET` estornada fica com um `WIN` de pé; referência inexistente termina em `REFERENCE_NOT_FOUND`. Também verifica que, só com créditos, a ordem de entrega não muda o saldo final, e que a aritmética de `Money` é exata e sobrevive ao formato de fio. Quando uma propriedade falha, o fast-check reduz o histórico ao menor contraexemplo e imprime a semente para reproduzir.
 - **Resiliência de infraestrutura:** com duas instâncias reais sob carga, o teste mata o container do PostgreSQL. A readiness passa a `503` e a liveness continua `200`. Os clientes HTTP recebem `503` com `Retry-After` (nunca `500`) e reenviam com a mesma chave. As mensagens SQS voltam para a fila e são reprocessadas. Depois do restart, cada operação tem exatamente uma linha `PROCESSED`, os saldos e versões batem e a DLQ está vazia. No segundo cenário o LocalStack é congelado: o caminho financeiro não depende do broker, então o HTTP segue respondendo `201`, os eventos se acumulam na outbox e são publicados quando o SQS volta. Para isso funcionar, nenhuma chamada fica pendurada: o driver tem `query_timeout`, `connectionTimeoutMillis` e timeout de aquisição do pool, o SDK do SQS tem `requestTimeout`/`connectionTimeout`, e os erros de conexão perdida são classificados como transitórios (`DATABASE_UNAVAILABLE`).
 - Determinismo: cada arquivo usa filas próprias (nomes aleatórios) e wallets próprias. Esperas são por condição (`waitFor`), não por `sleep` fixo.
 
@@ -326,6 +343,7 @@ Desenho que eu adotaria:
 - **Partidas dobradas** não foram implementadas. O ledger é de uma entrada por wallet, com cadeia de versão e trigger de consistência. O próximo passo seria uma conta-contrapartida por provedor/house.
 - **Moeda única nos dados:** o modelo e os testes são multi-moeda, mas a escala é fixa em 2 casas para todas as moedas (como o README define). Moedas com 0 ou 3 casas exigiriam escala por moeda.
 - **Retenção:** inbox e outbox publicada crescem indefinidamente. Em produção, um job de limpeza por idade (ex.: 14 dias, alinhado à retenção do SQS) resolveria.
+- **Imagem e CI:** o container roda com o usuário sem privilégios `bun` da imagem oficial, e o workflow de CI usa um token só de leitura (`permissions: contents: read`).
 - **Teste de carga** roda numa única máquina (gerador, 3 instâncias, PostgreSQL e LocalStack dividindo 4 vCPUs). Os números são um piso, não capacidade. Ver `docs/load-test-results.md`.
 
 ---

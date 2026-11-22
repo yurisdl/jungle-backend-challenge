@@ -176,6 +176,29 @@ describe('transactional outbox', () => {
     }
   }, 60_000);
 
+  test('an event waiting for retry is never overtaken by a later event of the same wallet', async () => {
+    const [walletId] = await produceEvents(1, 3);
+    const { total } = await pendingFor([walletId!]);
+    // SQS refuses the first event (OPENING's WalletBalanceChanged); everything after it must wait
+    const publisher = await startTestApp({ ...env, APP_ROLES: '', FAULT_INJECTION: 'reject-first-event', OUTBOX_RETRY_BASE_MS: '200' });
+    try {
+      expect(await publisher.container.outboxPublisher.publishBatch()).toBe(0);
+      expect((await pendingFor([walletId!])).pending).toHaveLength(total);
+      await waitFor(
+        async () => {
+          await publisher.container.outboxPublisher.publishBatch();
+          return (await pendingFor([walletId!])).pending.length === 0;
+        },
+        { label: 'published after retry' },
+      );
+    } finally {
+      await publisher.stop();
+    }
+    const received = (await collectEvents(new Set([walletId!]), total)).map((m) => JSON.parse(m.Body!));
+    const expected = await sql<{ id: string }>(`select id from outbox_messages where aggregate_id = ? order by occurred_at, id`, [walletId]);
+    expect(received.map((e) => e.eventId)).toEqual(expected.map((r) => r.id));
+  }, 30_000);
+
   test('when SQS rejects the publication the row is rescheduled with backoff, then published', async () => {
     const walletIds = await produceEvents(1, 0);
     const failing = await startTestApp({ ...env, APP_ROLES: '', FAULT_INJECTION: 'fail-publish', OUTBOX_RETRY_BASE_MS: '300' });

@@ -21,6 +21,7 @@ export enum FailureCode {
   ReferenceNotProcessed = 'REFERENCE_NOT_PROCESSED',
   ReferenceAmountMismatch = 'REFERENCE_AMOUNT_MISMATCH',
   ReferenceAlreadyReversed = 'REFERENCE_ALREADY_REVERSED',
+  ReferenceAlreadySettled = 'REFERENCE_ALREADY_SETTLED',
 
   // ---- permanent infrastructure failures (FAILED, terminal, auditable)
   ProcessingRetriesExhausted = 'PROCESSING_RETRIES_EXHAUSTED',

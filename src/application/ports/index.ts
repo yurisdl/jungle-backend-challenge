@@ -39,11 +39,14 @@ export interface WagerTransactionRepository {
   findByExternalId(providerId: string, externalTransactionId: string): Promise<WagerTransaction | undefined>;
   findByKeyOrExternalId(idempotencyKey: string, providerId: string, externalTransactionId: string): Promise<WagerTransaction[]>;
   hasProcessedReversal(referenceTransactionId: string): Promise<boolean>;
+  /** A PROCESSED WIN references this transaction and was not rolled back itself. */
+  hasActiveWin(referenceTransactionId: string): Promise<boolean>;
   insert(tx: WagerTransaction, at: Date): Promise<void>;
   update(tx: WagerTransaction, at: Date): Promise<void>;
   /** Pulls forward the schedule of transactions waiting on this external id. */
   wakeDependents(providerId: string, externalTransactionId: string, at: Date): Promise<number>;
   findDuePendingReferenceIds(now: Date, limit: number): Promise<string[]>;
+  countPendingReferences(): Promise<number>;
 }
 
 export interface LedgerTotals {
@@ -62,8 +65,11 @@ export interface LedgerRepository {
 }
 
 export interface InboxRepository {
-  /** INSERT … ON CONFLICT DO NOTHING. Returns false when the message was already received. */
-  tryReceive(message: InboxMessage): Promise<boolean>;
+  /**
+   * INSERT … ON CONFLICT DO NOTHING. `duplicate`: the same message was already
+   * received; `conflict`: that messageId was received with a different payload.
+   */
+  tryReceive(message: InboxMessage): Promise<'received' | 'duplicate' | 'conflict'>;
   markProcessed(message: InboxMessage): Promise<void>;
 }
 

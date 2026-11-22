@@ -2,11 +2,13 @@ import { MikroORM, type Options } from '@mikro-orm/postgresql';
 import { Migrator } from '@mikro-orm/migrations';
 import type { AppConfig } from '../config/app-config';
 import { Migration20261120000001_initial_schema } from './migrations/Migration20261120000001_initial_schema';
+import { Migration20261122000001_outbox_aggregate_order } from './migrations/Migration20261122000001_outbox_aggregate_order';
 import { ENTITY_SCHEMAS } from './schemas/records';
 
 /** Migrations are listed explicitly: no filesystem discovery at runtime. */
 export const MIGRATIONS = [
   { name: 'Migration20261120000001_initial_schema', class: Migration20261120000001_initial_schema },
+  { name: 'Migration20261122000001_outbox_aggregate_order', class: Migration20261122000001_outbox_aggregate_order },
 ];
 
 export function ormOptions(config: AppConfig): Options {

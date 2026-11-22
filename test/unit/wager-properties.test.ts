@@ -42,7 +42,14 @@ function simulate(ops: GeneratedOp[], delivery: number[], opening: string) {
     if (!tx.referenceExternalTransactionId) return undefined;
     const ref = byExternal.get(tx.referenceExternalTransactionId);
     if (!ref) return { found: false };
-    return { found: true, transaction: ref, alreadyReversed: tx.isReversal() && reversed.has(ref.id) };
+    const activeWin = [...byExternal.values()].some(
+      (t) =>
+        t.kind === WagerTransactionKind.Win &&
+        t.status === S.Processed &&
+        t.referenceTransactionId === ref.id &&
+        !reversed.has(t.id),
+    );
+    return { found: true, transaction: ref, alreadyReversed: reversed.has(ref.id), settledByWin: tx.isReversal() && activeWin };
   };
   const settle = (tx: WagerTransaction, exhausted: boolean) => {
     const before = wallet.balance;
@@ -135,7 +142,17 @@ describe('settlement properties (fast-check)', () => {
             expect(entry.direction).not.toBe(entries.find((e) => e.transactionId === ref.id)!.direction);
           }
 
-          // 5. a ghost reference always ends REFERENCE_NOT_FOUND
+          // 5. a BET is never both paid and reversed: a refunded or rolled back BET
+          //    has no WIN left standing (a WIN rolled back itself no longer counts)
+          for (const bet of txs.filter((t) => t.kind === WagerTransactionKind.Bet)) {
+            if (!refs.includes(bet.id)) continue;
+            const standingWins = txs.filter(
+              (t) => t.kind === WagerTransactionKind.Win && t.status === S.Processed && t.referenceTransactionId === bet.id && !refs.includes(t.id),
+            );
+            expect(standingWins).toHaveLength(0);
+          }
+
+          // 6. a ghost reference always ends REFERENCE_NOT_FOUND
           for (const tx of txs.filter((t) => t.referenceExternalTransactionId?.startsWith('ghost-'))) {
             expect(tx.failureCode).toBe(FailureCode.ReferenceNotFound);
           }

@@ -54,10 +54,11 @@ const ctx = (exhausted = false) => ({
   referenceRetriesExhausted: exhausted,
 });
 
-const found = (t: WagerTransaction, alreadyReversed = false): ReferenceLookup => ({
+const found = (t: WagerTransaction, alreadyReversed = false, settledByWin = false): ReferenceLookup => ({
   found: true,
   transaction: t,
   alreadyReversed,
+  settledByWin,
 });
 
 function processedBet(w: Wallet, amount = '10.00') {
@@ -124,6 +125,8 @@ describe('BET', () => {
     const w = wallet();
     const bet = tx(K.Bet, '1.00', { player: 'p2' });
     expect(settleWager(bet, w, undefined, ctx())).toEqual({ type: 'rejected', code: FailureCode.PlayerWalletMismatch });
+    // the rejection must not reveal the balance of a wallet that is not the player's
+    expect(bet.observedBalance).toBeUndefined();
   });
 });
 
@@ -301,5 +304,52 @@ describe('payload hash', () => {
     const t = tx(K.Bet);
     expect(t.matchesPayload(t.payloadHash)).toBe(true);
     expect(t.matchesPayload('something-else')).toBe(false);
+  });
+});
+
+describe('a BET is either settled or reversed, never both', () => {
+  test('WIN of a refunded BET is rejected and pays nothing', () => {
+    const w = wallet('100.00');
+    const bet = processedBet(w, '10.00');
+    settleWager(tx(K.Refund, '10.00', { ref: bet.externalTransactionId }), w, found(bet), ctx());
+    expect(w.balance.amount).toBe('100.00');
+
+    const win = tx(K.Win, '50.00', { ref: bet.externalTransactionId });
+    expect(settleWager(win, w, found(bet, true), ctx())).toEqual({
+      type: 'rejected',
+      code: FailureCode.ReferenceAlreadyReversed,
+    });
+    expect(w.balance.amount).toBe('100.00');
+  });
+  test('LOSS of a rolled back BET is rejected', () => {
+    const w = wallet('100.00');
+    const bet = processedBet(w, '10.00');
+    const loss = tx(K.Loss, '0.00', { ref: bet.externalTransactionId });
+    expect(settleWager(loss, w, found(bet, true), ctx())).toEqual({
+      type: 'rejected',
+      code: FailureCode.ReferenceAlreadyReversed,
+    });
+  });
+  test('REFUND or ROLLBACK of a BET that already paid a WIN is rejected', () => {
+    const w = wallet('100.00');
+    const bet = processedBet(w, '10.00');
+    settleWager(tx(K.Win, '50.00', { ref: bet.externalTransactionId }), w, found(bet), ctx());
+    expect(w.balance.amount).toBe('140.00');
+
+    for (const kind of [K.Refund, K.Rollback]) {
+      const reversal = tx(kind, '10.00', { ref: bet.externalTransactionId });
+      expect(settleWager(reversal, w, found(bet, false, true), ctx())).toEqual({
+        type: 'rejected',
+        code: FailureCode.ReferenceAlreadySettled,
+      });
+    }
+    expect(w.balance.amount).toBe('140.00');
+  });
+  test('once the WIN is rolled back, the BET can be refunded', () => {
+    const w = wallet('100.00');
+    const bet = processedBet(w, '10.00');
+    const refund = tx(K.Refund, '10.00', { ref: bet.externalTransactionId });
+    expect(settleWager(refund, w, found(bet, false, false), ctx()).type).toBe('processed');
+    expect(w.balance.amount).toBe('100.00');
   });
 });

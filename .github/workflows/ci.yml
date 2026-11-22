@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# read-only token: the jobs only check out code and run tests and a build
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true

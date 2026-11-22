@@ -31,9 +31,12 @@ export class PendingReferenceWorker extends PollingWorker {
         if (outcome === 'processed' || outcome === 'rejected') done++;
       } catch (error) {
         this.logger.warn({ worker: this.name, transactionId: id, ...errorFields(error) }, 'pending reference retry failed');
+        await this.retry.postpone(id).catch((postponeError: unknown) =>
+          this.logger.warn({ worker: this.name, transactionId: id, ...errorFields(postponeError) }, 'could not postpone pending reference'),
+        );
       }
     }
-    this.metrics.pendingReferences.set(ids.length - done);
+    this.metrics.pendingReferences.set(await this.retry.countPending());
     return done;
   }
 }

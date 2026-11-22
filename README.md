@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/PostgreSQL-16-0E3B2E?style=flat-square&labelColor=1E2622" alt="PostgreSQL 16">
   <img src="https://img.shields.io/badge/MikroORM-6-0E3B2E?style=flat-square&labelColor=1E2622" alt="MikroORM 6">
   <img src="https://img.shields.io/badge/SQS-LocalStack-0E3B2E?style=flat-square&labelColor=1E2622" alt="SQS via LocalStack">
-  <img src="https://img.shields.io/badge/testes-121-C79A3A?style=flat-square&labelColor=1E2622" alt="121 testes">
+  <img src="https://img.shields.io/badge/testes-136-C79A3A?style=flat-square&labelColor=1E2622" alt="136 testes">
 </p>
 
 Serviço que recebe transações de apostas (`BET`, `WIN`, `LOSS`, `REFUND`, `ROLLBACK`) de vários provedores, por HTTP e por SQS, e mantém o saldo de cada jogador exato quando as mensagens chegam duplicadas, fora de ordem, ao mesmo tempo e em várias instâncias.
@@ -33,7 +33,9 @@ O bilhete acima é o cenário obrigatório do desafio: saldo de 100.00 e duas ap
 | a mesma aposta debitada duas vezes | `Idempotency-Key` com hash do payload, inbox por mensagem e `UNIQUE` no banco | `hot-wallet.test.ts`, `sqs-consumer.test.ts` |
 | saldo que o ledger não explica | *constraint trigger* adiada para o commit compara a wallet com o último lançamento | `test/integration/schema.test.ts` |
 | reversão aplicada duas vezes | índice único parcial por referência | `schema.test.ts`, `wager-properties.test.ts` |
-| evento perdido ou publicado sem commit | outbox na mesma transação, publicada com `FOR UPDATE SKIP LOCKED` | `test/integration/outbox.test.ts` |
+| aposta paga e estornada | `WIN` de aposta estornada e estorno de aposta já paga são recusados | `wager-rules.test.ts`, `wager-properties.test.ts` |
+| evento perdido ou publicado sem commit | outbox gravada na mesma transação do saldo | `test/integration/outbox.test.ts` |
+| eventos de uma wallet fora de ordem | publisher reivindica a wallet com advisory lock e para no primeiro evento recusado | `test/integration/outbox.test.ts` |
 | débito repetido quando a instância morre antes do ack | inbox gravada junto com o débito; a reentrega só é confirmada | `test/concurrency/multi-instance.test.ts` |
 | `500` quando o PostgreSQL cai | timeouts no cliente; conexão perdida vira `503` com `Retry-After` | `test/resilience/infra-outage.test.ts` |
 
@@ -108,7 +110,7 @@ flowchart LR
   CON -. erro permanente .-> DLQ
   USE == "uma transação SQL" ==> DB
   PEND -- "backoff exponencial" --> DB
-  PUB -- "SKIP LOCKED" --> DB
+  PUB -- "lock por wallet" --> DB
   PUB --> EVENTS
 ```
 
@@ -130,7 +132,7 @@ sequenceDiagram
   I->>DB: saldo WHERE version, ledger, outbox
   DB-->>I: COMMIT (trigger: saldo = ledger)
   I-->>P: 201 PROCESSED
-  Q->>DB: outbox FOR UPDATE SKIP LOCKED
+  Q->>DB: reivindica a wallet (advisory lock)
   Q->>Q: publica, dedup por eventId
 ```
 

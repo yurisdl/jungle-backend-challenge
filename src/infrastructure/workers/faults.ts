@@ -3,7 +3,7 @@
  * empty, so every call is a no-op. Integration tests use it to kill a
  * process at a precise point (e.g. after the SQL commit, before the SQS ack).
  */
-export type FaultPoint = 'crash-after-commit' | 'crash-after-publish' | 'fail-publish';
+export type FaultPoint = 'crash-after-commit' | 'crash-after-publish' | 'fail-publish' | 'reject-first-event' | 'fail-ack-once';
 
 export class FaultInjector {
   constructor(private readonly points: readonly string[]) {}

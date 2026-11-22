@@ -1,4 +1,4 @@
-import { settleWager, WagerTransactionStatus } from '../../domain';
+import { FailureCode, settleWager, WagerTransactionStatus } from '../../domain';
 import type { AppLogger, Clock, IdGenerator, Metrics, UnitOfWork } from '../ports';
 import { withConflictRetry } from '../services/conflict-retry';
 import { nextReferenceAttempt, type ReferenceRetryPolicy, WagerSettlementWriter } from './wager-settlement.service';
@@ -29,6 +29,11 @@ export class RetryPendingReference {
     return this.uow.transaction((store) => store.transactions.findDuePendingReferenceIds(this.clock.now(), limit), {
       readOnly: true,
     });
+  }
+
+  /** Every transaction still waiting for its reference, due or not (for the gauge). */
+  async countPending(): Promise<number> {
+    return this.uow.transaction((store) => store.transactions.countPendingReferences(), { readOnly: true });
   }
 
   async execute(transactionId: string): Promise<RetryOutcome> {
@@ -86,5 +91,36 @@ export class RetryPendingReference {
     );
     if (outcome === 'still-pending') this.metrics.retry('pending-reference', 'reference-missing');
     return outcome;
+  }
+
+  /**
+   * Called when re-evaluating a transaction threw (lock timeout, invariant
+   * violation, a bug). Counts the attempt and pushes the next one back, so a
+   * transaction that keeps failing cannot stay at the head of the queue and
+   * starve the others. Once the attempt budget is spent it ends FAILED
+   * (PROCESSING_RETRIES_EXHAUSTED): no balance, ledger or event is touched.
+   */
+  async postpone(transactionId: string): Promise<'postponed' | 'failed' | 'skipped'> {
+    return this.uow.transaction(async (store) => {
+      const tx = await store.transactions.lockById(transactionId);
+      if (!tx || tx.status !== WagerTransactionStatus.PendingReference) return 'skipped' as const;
+      const now = this.clock.now();
+      const attemptsAfterThis = tx.attempts + 1;
+      if (attemptsAfterThis >= this.policy.maxAttempts) {
+        tx.fail(FailureCode.ProcessingRetriesExhausted, now);
+        await store.transactions.update(tx, now);
+        await store.transactions.wakeDependents(tx.providerId, tx.externalTransactionId, now);
+        this.metrics.transactionOutcome(tx.status, tx.kind, 'worker');
+        this.logger.error(
+          { transactionId: tx.id, walletId: tx.walletId, providerId: tx.providerId, attempts: attemptsAfterThis },
+          'pending reference kept failing, recorded as FAILED',
+        );
+        return 'failed' as const;
+      }
+      tx.postponeAfterFailure(nextReferenceAttempt(this.policy, now, attemptsAfterThis));
+      await store.transactions.update(tx, now);
+      this.metrics.retry('pending-reference', 'processing-error');
+      return 'postponed' as const;
+    });
   }
 }

@@ -208,7 +208,16 @@ export class WagerTransaction {
     this._observedBalance = observedBalance;
   }
 
-  reject(code: FailureCode, at: Date, observedBalance: Money, referenceTransactionId?: string): void {
+  /** A re-evaluation failed for a technical reason: count it and try later. */
+  postponeAfterFailure(nextAttemptAt: Date): void {
+    if (this._status !== WagerTransactionStatus.PendingReference) {
+      throw new InvalidTransactionStateError(`cannot postpone a ${this._status} transaction`);
+    }
+    this._attempts += 1;
+    this._nextAttemptAt = nextAttemptAt;
+  }
+
+  reject(code: FailureCode, at: Date, observedBalance: Money | undefined, referenceTransactionId?: string): void {
     this.transitionTo(WagerTransactionStatus.Rejected);
     this._failureCode = code;
     this._processedAt = at;

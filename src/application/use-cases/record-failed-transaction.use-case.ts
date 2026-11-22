@@ -47,7 +47,8 @@ export class RecordFailedTransaction {
         return tx.id;
       });
     } catch (error) {
-      this.logger.error({ correlationId, walletId: command.walletId }, 'could not record FAILED transaction');
+      const cause = error instanceof Error ? { type: error.name, message: error.message } : { message: String(error) };
+      this.logger.error({ correlationId, walletId: command.walletId, error: cause }, 'could not record FAILED transaction');
       return undefined;
     }
   }

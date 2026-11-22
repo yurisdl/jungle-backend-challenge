@@ -36,6 +36,11 @@ export class ExternalTransactionConflictError extends ApplicationError {
   readonly code = 'EXTERNAL_TRANSACTION_CONFLICT';
 }
 
+/** Same queue messageId already received with a different body. Never a duplicate. */
+export class InboxMessageConflictError extends ApplicationError {
+  readonly code = 'INBOX_MESSAGE_CONFLICT';
+}
+
 export class WalletAlreadyExistsError extends ApplicationError {
   readonly code = 'WALLET_ALREADY_EXISTS';
 }

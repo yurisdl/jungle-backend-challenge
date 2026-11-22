@@ -214,6 +214,45 @@ describe('wager transactions over HTTP', () => {
     expect(state.entries.map((e) => e.direction)).toEqual(['CREDIT', 'DEBIT', 'CREDIT', 'CREDIT', 'DEBIT']);
   });
 
+  test("naming another player's wallet is a 422 that reveals nothing about it", async () => {
+    const victim = await createWallet(base, '777.00');
+    const res = await submit(base, { wallet: { id: victim.id, playerId: randomUUID() }, kind: 'BET', amount: '1.00' });
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({ failureCode: 'PLAYER_WALLET_MISMATCH', balance: null });
+    const [event] = await sql(
+      `select payload from outbox_messages where aggregate_id = ? and event_type = 'WagerTransactionRejected'`,
+      [victim.id],
+    );
+    expect(event).toBeDefined();
+    expect(JSON.stringify(event!.payload)).not.toContain('777');
+    expect((await walletState(victim.id)).wallet.balance).toBe('777.00');
+  });
+
+  test('a BET is paid or reversed, never both', async () => {
+    const w = await createWallet(base, '100.00');
+    const betId = `bet-${w.id}`;
+    await submit(base, { wallet: w, kind: 'BET', amount: '10.00', externalTransactionId: betId });
+    const win = await submit(base, { wallet: w, kind: 'WIN', amount: '50.00', reference: betId, externalTransactionId: `win-${w.id}` });
+    expect(win.body.balance.amount).toBe('140.00');
+
+    // refunding the BET now would return the stake on top of the winnings
+    const early = await submit(base, { wallet: w, kind: 'REFUND', amount: '10.00', reference: betId });
+    expect(early.status).toBe(422);
+    expect(early.body.failureCode).toBe('REFERENCE_ALREADY_SETTLED');
+
+    // roll the WIN back first, then the BET can be refunded
+    const rbWin = await submit(base, { wallet: w, kind: 'ROLLBACK', amount: '50.00', reference: `win-${w.id}` });
+    expect(rbWin.body.balance.amount).toBe('90.00');
+    const refund = await submit(base, { wallet: w, kind: 'REFUND', amount: '10.00', reference: betId });
+    expect(refund.body).toMatchObject({ status: 'PROCESSED', balance: { amount: '100.00' } });
+
+    // and a WIN arriving after the refund pays nothing
+    const late = await submit(base, { wallet: w, kind: 'WIN', amount: '50.00', reference: betId });
+    expect(late.status).toBe(422);
+    expect(late.body.failureCode).toBe('REFERENCE_ALREADY_REVERSED');
+    expect((await walletState(w.id)).wallet.balance).toBe('100.00');
+  });
+
   test('ROLLBACK of a WIN that would make the balance negative is rejected with its own code', async () => {
     const w = await createWallet(base, '0.00');
     await submit(base, { wallet: w, kind: 'WIN', amount: '50.00', externalTransactionId: `w-${w.id}` });

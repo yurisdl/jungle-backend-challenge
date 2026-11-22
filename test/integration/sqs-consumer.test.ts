@@ -127,6 +127,20 @@ describe('SQS consumer', () => {
     expect((await walletState(w.id)).wallet.balance).toBe('99.00');
   });
 
+  test('a reused messageId with a different body is dead-lettered, not dropped as a duplicate', async () => {
+    const w = await createWallet(api.baseUrl, '100.00');
+    const first = wagerMessage({ wallet: w, kind: 'BET', amount: '10.00', externalTransactionId: `first-${w.id}` });
+    await sendMessage(sqs, urls.wager, first);
+    await waitFor(async () => (await txStatus(w.id, `first-${w.id}`))?.status === 'PROCESSED', { label: 'first' });
+
+    const reused = wagerMessage({ wallet: w, kind: 'BET', amount: '30.00', externalTransactionId: `second-${w.id}` }, first.messageId);
+    await sendMessage(sqs, urls.wager, reused);
+    const [dead] = await dlqMessages(1);
+    expect(dead!.MessageAttributes?.deadLetterReason?.StringValue).toBe('INBOX_MESSAGE_CONFLICT');
+    expect(JSON.parse(dead!.Body!).data.externalTransactionId).toBe(`second-${w.id}`);
+    expect((await walletState(w.id)).wallet.balance).toBe('90.00');
+  });
+
   test('transient failure (wallet lock timeout) is retried with backoff and then succeeds', async () => {
     const w = await createWallet(api.baseUrl, '100.00');
     const ext = `transient-${w.id}`;
@@ -150,5 +164,36 @@ describe('SQS consumer', () => {
     const tx = await waitFor(async () => txStatus(w.id, ext), { label: 'failed tx' });
     expect(tx).toMatchObject({ status: 'FAILED', failure_code: 'PROCESSING_RETRIES_EXHAUSTED' });
     expect((await walletState(w.id)).wallet.balance).toBe('100.00');
+  }, 40_000);
+});
+
+describe('SQS consumer, ack failure after commit', () => {
+  test('a failed delete after the commit is not treated as a processing failure', async () => {
+    const ackEnv = queueEnv('ack');
+    const queues = await testQueues(ackEnv);
+    const flaky = await startTestApp({ ...ackEnv, APP_ROLES: 'consumer', FAULT_INJECTION: 'fail-ack-once' });
+    try {
+      const w = await createWallet(api.baseUrl, '100.00');
+      const msg = wagerMessage({ wallet: w, kind: 'BET', amount: '10.00', externalTransactionId: `ack-${w.id}` });
+      await sendMessage(queues.sqs, queues.urls.wager, msg);
+      await waitFor(async () => (await txStatus(w.id, `ack-${w.id}`))?.status === 'PROCESSED', { label: 'processed' });
+
+      // the message comes back after its visibility timeout and is acked as a duplicate
+      const metrics = async () => flaky.container.metrics.registry.metrics();
+      await waitFor(async () => (await metrics()).includes('wager_duplicates_total{source="sqs"'), {
+        label: 'redelivery absorbed',
+        timeoutMs: 20_000,
+      });
+      const text = await metrics();
+      expect(text).toContain('sqs_messages_total{outcome="ack-failed"} 1');
+      expect(text).toContain('sqs_messages_total{outcome="acked"} 1');
+      // before the fix the failed delete went down the transient-failure path
+      expect(text).not.toContain('sqs_messages_total{outcome="retry-scheduled"}');
+      expect(text).not.toContain('operation="sqs-consume"');
+      expect(await drain(queues.sqs, queues.urls.wagerDlq, 1)).toHaveLength(0);
+      expect((await walletState(w.id)).wallet.balance).toBe('90.00');
+    } finally {
+      await flaky.stop();
+    }
   }, 40_000);
 });

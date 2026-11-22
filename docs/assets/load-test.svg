@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 220" width="1200" height="220" role="img" aria-labelledby="t d">
   <title id="t">Teste de carga</title>
-  <desc id="d">Faixa de título do relatório de carga com um bilhete resumindo o resultado: 10 000 requisições, 0 erros, p95 de 82 ms nas wallets comuns e saldo igual ao ledger em todas as wallets.</desc>
+  <desc id="d">Faixa de título do relatório de carga com um bilhete resumindo o resultado: 10 000 requisições, 0 erros, p95 de 69 ms nas wallets comuns e saldo igual ao ledger em todas as wallets.</desc>
   <style>
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
     .ink { fill: #1E2622; font-size: 15px; }
@@ -33,7 +33,7 @@
     <text class="ink" x="822" y="126">erros</text>
     <text class="ink" x="1124" y="126" text-anchor="end">0</text>
     <text class="ink" x="822" y="150">p95 wallets comuns</text>
-    <text class="ink" x="1124" y="150" text-anchor="end">82 ms</text>
+    <text class="ink" x="1124" y="150" text-anchor="end">69 ms</text>
     <text class="ink" x="822" y="174">saldo = Σ ledger</text>
     <text class="ink" x="1124" y="174" text-anchor="end">todas</text>
   </g>

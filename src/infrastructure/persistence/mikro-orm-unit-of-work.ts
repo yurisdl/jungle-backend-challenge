@@ -114,6 +114,22 @@ class MikroOrmWagerTransactionRepository implements WagerTransactionRepository {
     return count > 0;
   }
 
+  async hasActiveWin(referenceTransactionId: string): Promise<boolean> {
+    const wins = await this.em.find(
+      WagerTransactionRecord,
+      { referenceTransactionId, kind: WagerTransactionKind.Win, status: WagerTransactionStatus.Processed },
+      { ...FRESH, fields: ['id'] },
+    );
+    if (wins.length === 0) return false;
+    // A WIN is reversed at most once (wager_tx_single_reversal_uq), so one reversal per WIN cancels it.
+    const reversedWins = await this.em.count(WagerTransactionRecord, {
+      referenceTransactionId: { $in: wins.map((w) => w.id) },
+      kind: WagerTransactionKind.Rollback,
+      status: WagerTransactionStatus.Processed,
+    });
+    return reversedWins < wins.length;
+  }
+
   async insert(tx: WagerTransaction, at: Date): Promise<void> {
     await this.em.insert(WagerTransactionRecord, WagerTransactionMapper.toRecord(tx, at));
   }
@@ -148,6 +164,10 @@ class MikroOrmWagerTransactionRepository implements WagerTransactionRepository {
       },
       { nextAttemptAt: at, updatedAt: at },
     );
+  }
+
+  async countPendingReferences(): Promise<number> {
+    return this.em.count(WagerTransactionRecord, { status: WagerTransactionStatus.PendingReference });
   }
 
   async findDuePendingReferenceIds(now: Date, limit: number): Promise<string[]> {
@@ -206,7 +226,7 @@ function normaliseNumeric(value: string): string {
 class MikroOrmInboxRepository implements InboxRepository {
   constructor(private readonly em: EntityManager) {}
 
-  async tryReceive(message: InboxMessage): Promise<boolean> {
+  async tryReceive(message: InboxMessage): Promise<'received' | 'duplicate' | 'conflict'> {
     const rows = await this.em.execute<Array<{ message_id: string }>>(
       `insert into inbox_messages (consumer_name, message_id, payload_hash, received_at)
        values (?, ?, ?, ?)
@@ -214,7 +234,12 @@ class MikroOrmInboxRepository implements InboxRepository {
        returning message_id`,
       [message.consumerName, message.messageId, message.payloadHash, message.receivedAt],
     );
-    return rows.length === 1;
+    if (rows.length === 1) return 'received';
+    const [stored] = await this.em.execute<Array<{ payload_hash: string }>>(
+      `select payload_hash from inbox_messages where consumer_name = ? and message_id = ?`,
+      [message.consumerName, message.messageId],
+    );
+    return stored?.payload_hash === message.payloadHash ? 'duplicate' : 'conflict';
   }
 
   async markProcessed(message: InboxMessage): Promise<void> {

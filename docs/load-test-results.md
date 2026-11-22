@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/load-test.svg" width="100%" alt="Teste de carga: 10 000 requisições, 0 erros, p95 de 82 ms nas wallets comuns, saldo igual ao ledger em todas as wallets.">
+  <img src="assets/load-test.svg" width="100%" alt="Teste de carga: 10 000 requisições, 0 erros, p95 de 69 ms nas wallets comuns, saldo igual ao ledger em todas as wallets.">
 </p>
 
-<sub>Gerado por `bun run test:load` em 2026-11-20T15:59:50.149Z. Voltar ao [README](../README.md).</sub>
+<sub>Gerado por `bun run test:load` em 2026-11-22T04:07:31.803Z. Voltar ao [README](../README.md).</sub>
 
 ## Ambiente
 
@@ -21,18 +21,18 @@
 
 | Métrica | Valor |
 |---|---|
-| duração | 46.9 s |
-| vazão | 213 req/s |
-| latência p50 / p95 / p99, todas | 38.9 / 1821.4 / 2376.1 ms |
-| latência p50 / p95 / p99, wallets comuns (8001 req) | 32.4 / 82.0 / 277.4 ms |
-| latência p50 / p95 / p99, hot wallet (1999 req) | 1374.4 / 2376.1 / 2643.1 ms |
-| latência máxima | 2854.1 ms |
+| duração | 37.1 s |
+| vazão | 270 req/s |
+| latência p50 / p95 / p99, todas | 29.8 / 1518.6 / 2157.6 ms |
+| latência p50 / p95 / p99, wallets comuns (8024 req) | 25.3 / 68.5 / 321.1 ms |
+| latência p50 / p95 / p99, hot wallet (1976 req) | 892.8 / 2157.9 / 2342.5 ms |
+| latência máxima | 2451.7 ms |
 | taxa de erro (5xx ou rede) | 0.00% (0) |
-| status HTTP | 200: 1048, 201: 8952 |
-| duplicatas detectadas (replays) | 1048 |
+| status HTTP | 200: 993, 201: 9007 |
+| duplicatas detectadas (replays) | 993 |
 | conflitos de lock (timeouts, corridas, deadlocks) | 0 |
 | retries de transação | 0 |
-| outbox esvaziada após a carga | 0.2 s (atraso medido no fim: 0.0 s) |
+| outbox esvaziada após a carga | 0.2 s (atraso medido no fim: 0.8 s) |
 | saldo == ledger | ✅ todas as wallets |
 
 ## Como ler os números

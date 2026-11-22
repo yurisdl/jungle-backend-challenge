@@ -71,7 +71,8 @@ export class WagerTransactionProcessed extends IntegrationEvent<WagerTransaction
 export interface WagerTransactionRejectedData extends TransactionEventBase {
   status: WagerTransactionStatus.Rejected;
   failureCode: FailureCode;
-  balance: MoneyProps;
+  /** null when the wallet does not belong to the player (PLAYER_WALLET_MISMATCH) */
+  balance: MoneyProps | null;
   rejectedAt: string;
 }
 
@@ -87,7 +88,7 @@ export class WagerTransactionRejected extends IntegrationEvent<WagerTransactionR
           ...baseOf(tx),
           status: tx.status as WagerTransactionStatus.Rejected,
           failureCode: tx.failureCode!,
-          balance: tx.observedBalance!.toJSON(),
+          balance: tx.observedBalance?.toJSON() ?? null,
           rejectedAt: tx.processedAt!.toISOString(),
         },
         ctx,

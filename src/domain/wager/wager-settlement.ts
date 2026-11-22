@@ -14,8 +14,10 @@ export type ReferenceLookup =
   | {
       found: true;
       transaction: WagerTransaction;
-      /** another REFUND/ROLLBACK already PROCESSED against this reference */
+      /** a REFUND/ROLLBACK already PROCESSED against this reference */
       alreadyReversed: boolean;
+      /** a PROCESSED WIN references this BET and has not been rolled back itself */
+      settledByWin: boolean;
     };
 
 export interface SettlementContext {
@@ -44,7 +46,9 @@ export function settleWager(
   ctx: SettlementContext,
 ): SettlementOutcome {
   const reject = (code: FailureCode, referenceId?: string): SettlementOutcome => {
-    tx.reject(code, ctx.at, wallet.balance, referenceId);
+    // A caller that names someone else's wallet learns nothing about it.
+    const observed = code === FailureCode.PlayerWalletMismatch ? undefined : wallet.balance;
+    tx.reject(code, ctx.at, observed, referenceId);
     return { type: 'rejected', code };
   };
 
@@ -97,6 +101,14 @@ export function settleWager(
       if (reference.alreadyReversed) {
         return reject(FailureCode.ReferenceAlreadyReversed, ref.id);
       }
+      // Refunding a BET that already paid a WIN would hand back the stake on
+      // top of the winnings: the WIN has to be rolled back first.
+      if (ref.kind === WagerTransactionKind.Bet && reference.settledByWin) {
+        return reject(FailureCode.ReferenceAlreadySettled, ref.id);
+      }
+    } else if (reference.alreadyReversed) {
+      // WIN/LOSS of a BET that was refunded or rolled back: the round no longer exists.
+      return reject(FailureCode.ReferenceAlreadyReversed, ref.id);
     }
   }
 

@@ -2,6 +2,7 @@ import { InboxMessage, Money, settleWager, WagerTransaction } from '../../domain
 import {
   ExternalTransactionConflictError,
   IdempotencyConflictError,
+  InboxMessageConflictError,
   TransientInfrastructureError,
   UnknownWalletError,
 } from '../errors';
@@ -111,8 +112,13 @@ export class SubmitWagerTransaction {
     let inbox: InboxMessage | undefined;
     if (ctx.inbox) {
       inbox = InboxMessage.receive({ ...ctx.inbox, receivedAt: now });
-      const fresh = await store.inbox.tryReceive(inbox);
-      if (!fresh) return { type: 'duplicate-message' };
+      const received = await store.inbox.tryReceive(inbox);
+      if (received === 'duplicate') return { type: 'duplicate-message' };
+      if (received === 'conflict') {
+        throw new InboxMessageConflictError(
+          `message ${inbox.messageId} was already received with a different payload`,
+        );
+      }
     }
     const finish = async (result: SubmitResult): Promise<SubmitResult> => {
       if (inbox) {

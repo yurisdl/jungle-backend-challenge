@@ -10,6 +10,7 @@ import {
   ApplicationError,
   ExternalTransactionConflictError,
   IdempotencyConflictError,
+  InboxMessageConflictError,
   InvariantViolationError,
   TransientInfrastructureError,
   UnknownWalletError,
@@ -38,7 +39,7 @@ interface Envelope {
   data: unknown;
 }
 
-type Handling = 'acked' | 'dead-lettered' | 'retry-scheduled' | 'released';
+type Handling = 'acked' | 'ack-failed' | 'dead-lettered' | 'retry-scheduled' | 'released';
 
 /**
  * SQS consumer for `wager-transactions.fifo`.
@@ -54,6 +55,7 @@ type Handling = 'acked' | 'dead-lettered' | 'retry-scheduled' | 'released';
  */
 export class WagerQueueConsumer {
   private running = false;
+  private injectedAckFailure = false;
   private loop?: Promise<void>;
   private poll?: AbortController;
 
@@ -163,10 +165,6 @@ export class WagerQueueConsumer {
           payloadHash: sha256Hex(canonicalJson(envelope.data)),
         },
       });
-      // committed — a crash here means redelivery, absorbed by the inbox
-      this.faults.crashIfActive('crash-after-commit');
-      await this.ack(queueUrl, message);
-      return 'acked';
     } catch (error) {
       if (isPermanent(error)) {
         this.logger.warn({ ...log, ...errorFields(error) }, 'permanent failure, dead-lettering');
@@ -183,8 +181,26 @@ export class WagerQueueConsumer {
       const delay = Math.min(this.config.sqs.transientBackoffBaseSeconds * 2 ** (receiveCount - 1), 300);
       this.logger.warn({ ...log, receiveCount, retryInSeconds: delay, ...errorFields(error) }, 'transient failure, will retry');
       this.metrics.retry('sqs-consume', error instanceof TransientInfrastructureError ? error.reason : 'unexpected');
-      await this.changeVisibility(queueUrl, message, delay);
+      await this.changeVisibility(queueUrl, message, delay).catch((visibilityError: unknown) =>
+        // the message comes back when its current visibility timeout ends instead
+        this.logger.warn({ ...log, ...errorFields(visibilityError) }, 'could not reschedule message'),
+      );
       return 'retry-scheduled';
+    }
+
+    // Committed. Whatever happens from here on (a crash, a failed delete), SQS
+    // redelivers the message and the inbox recognises it: never a DLQ case.
+    this.faults.crashIfActive('crash-after-commit');
+    try {
+      if (this.faults.isActive('fail-ack-once') && !this.injectedAckFailure) {
+        this.injectedAckFailure = true;
+        throw new Error('fault injected: fail-ack-once');
+      }
+      await this.ack(queueUrl, message);
+      return 'acked';
+    } catch (error) {
+      this.logger.warn({ ...log, ...errorFields(error) }, 'ack failed after commit, the redelivery will be absorbed by the inbox');
+      return 'ack-failed';
     }
   }
 
@@ -251,6 +267,7 @@ function isPermanent(error: unknown): boolean {
   return (
     error instanceof ValidationError ||
     error instanceof IdempotencyConflictError ||
+    error instanceof InboxMessageConflictError ||
     error instanceof ExternalTransactionConflictError ||
     error instanceof UnknownWalletError ||
     error instanceof InvariantViolationError ||

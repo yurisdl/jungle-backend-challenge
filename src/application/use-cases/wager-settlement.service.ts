@@ -59,8 +59,11 @@ export class WagerSettlementWriter {
     if (!tx.referenceExternalTransactionId) return undefined;
     const ref = await store.transactions.findByExternalId(tx.providerId, tx.referenceExternalTransactionId);
     if (!ref) return { found: false };
-    const alreadyReversed = tx.isReversal() ? await store.transactions.hasProcessedReversal(ref.id) : false;
-    return { found: true, transaction: ref, alreadyReversed };
+    // Runs under the wallet lock, and settleWager only accepts a reference of
+    // the same wallet, so no concurrent settlement can change these answers.
+    const alreadyReversed = await store.transactions.hasProcessedReversal(ref.id);
+    const settledByWin = tx.isReversal() ? await store.transactions.hasActiveWin(ref.id) : false;
+    return { found: true, transaction: ref, alreadyReversed, settledByWin };
   }
 
   /**
@@ -97,6 +100,8 @@ export class WagerSettlementWriter {
         break;
       case 'rejected':
         events.push(WagerTransactionRejected.from(tx, ctx()));
+        // dependents can now be decided (REFERENCE_NOT_PROCESSED) without waiting for their backoff
+        await store.transactions.wakeDependents(tx.providerId, tx.externalTransactionId, at);
         break;
       case 'pending-reference':
         if (outcome.firstTime) {

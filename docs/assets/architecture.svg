@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 220" width="1200" height="220" role="img" aria-labelledby="t d">
   <title id="t">Arquitetura e decisões</title>
-  <desc id="d">Faixa de título do documento de arquitetura com um bilhete resumindo as garantias: lock por wallet, idempotência por chave, hash e inbox, outbox com SKIP LOCKED e o schema como última defesa.</desc>
+  <desc id="d">Faixa de título do documento de arquitetura com um bilhete resumindo as garantias: lock por wallet, idempotência por chave, hash e inbox, outbox publicada em ordem por wallet e o schema como última defesa.</desc>
   <style>
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
     .ink { fill: #1E2622; font-size: 15px; }
@@ -33,7 +33,7 @@
     <text class="ink" x="822" y="126">duplicatas</text>
     <text class="ink" x="1124" y="126" text-anchor="end">key + hash + inbox</text>
     <text class="ink" x="822" y="150">eventos</text>
-    <text class="ink" x="1124" y="150" text-anchor="end">outbox, SKIP LOCKED</text>
+    <text class="ink" x="1124" y="150" text-anchor="end">outbox em ordem</text>
     <text class="ink" x="822" y="174">última defesa</text>
     <text class="ink" x="1124" y="174" text-anchor="end">schema</text>
   </g>
