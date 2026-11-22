@@ -140,6 +140,8 @@ O porquê de cada escolha, as interpretações das regras e o que ficou de fora 
 
 ## Rodar
 
+> No Windows, rode os comandos no Git Bash ou no WSL: os exemplos usam sintaxe bash (`&&`, `\` no fim da linha, JSON entre aspas simples), que o PowerShell 5 não entende.
+
 ### Tudo com Docker Compose
 
 ```bash
