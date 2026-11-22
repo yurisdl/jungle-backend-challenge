@@ -27,6 +27,9 @@ const CONNECTION_MESSAGES = [
   'Connection Error',
   'Query read timeout',
   'timeout exceeded when trying to connect',
+  // pg, when opening a connection takes longer than connectionTimeoutMillis (the
+  // server accepted the TCP connection but never answered, e.g. behind a proxy)
+  'timeout expired',
   // knex reports this when the connection under a transaction died (query timeout / reset)
   'Transaction query already complete',
 ];

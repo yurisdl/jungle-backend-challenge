@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/PostgreSQL-16-0E3B2E?style=flat-square&labelColor=1E2622" alt="PostgreSQL 16">
   <img src="https://img.shields.io/badge/MikroORM-6-0E3B2E?style=flat-square&labelColor=1E2622" alt="MikroORM 6">
   <img src="https://img.shields.io/badge/SQS-LocalStack-0E3B2E?style=flat-square&labelColor=1E2622" alt="SQS via LocalStack">
-  <img src="https://img.shields.io/badge/testes-136-C79A3A?style=flat-square&labelColor=1E2622" alt="136 testes">
+  <img src="https://img.shields.io/badge/testes-137-C79A3A?style=flat-square&labelColor=1E2622" alt="137 testes">
 </p>
 
 Serviço que recebe transações de apostas (`BET`, `WIN`, `LOSS`, `REFUND`, `ROLLBACK`) de vários provedores, por HTTP e por SQS, e mantém o saldo de cada jogador exato quando as mensagens chegam duplicadas, fora de ordem, ao mesmo tempo e em várias instâncias.
