@@ -9,6 +9,7 @@ import {
 import { MikroORM } from '@mikro-orm/postgresql';
 import { expect } from 'bun:test';
 import { randomUUID } from 'node:crypto';
+import { type AddressInfo, createServer } from 'node:net';
 import { resolve } from 'node:path';
 import { startApplication, type RunningApp } from '../../src/app';
 import { type AppConfig, loadConfig } from '../../src/infrastructure/config/app-config';
@@ -283,12 +284,26 @@ export interface Instance {
   output(): string;
 }
 
-let nextPort = 4100 + Math.floor(Math.random() * 500);
+/**
+ * Asks the OS for a free port on all interfaces (the app listens on 0.0.0.0).
+ * A fixed range could hit a port docker publishes on the host, such as
+ * LocalStack's 4566; the OS hands out ephemeral ports that nothing else holds.
+ */
+function freePort(): Promise<number> {
+  return new Promise((resolvePort, reject) => {
+    const server = createServer();
+    server.on('error', reject);
+    server.listen(0, '0.0.0.0', () => {
+      const { port } = server.address() as AddressInfo;
+      server.close(() => resolvePort(port));
+    });
+  });
+}
 
 /** Spawns `bun src/main.ts` as a separate OS process (a real instance). */
 export async function spawnInstance(name: string, env: Record<string, string>): Promise<Instance> {
   await ensureSchema();
-  const port = nextPort++;
+  const port = await freePort();
   let buffer = '';
   const proc = Bun.spawn(['bun', 'src/main.ts'], {
     cwd: ROOT,
